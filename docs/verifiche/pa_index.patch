@@ -1,0 +1,198 @@
+--- a/Sources/RingCore/Fitness.swift
++++ b/Sources/RingCore/Fitness.swift
+@@ -9,22 +9,62 @@
+         public var see: Double
+     }
+ 
+-    /// Indice di attività fisica del modello HUNT (Nes et al. 2011): frequenza x intensità x durata, scala 0-45.
+-    /// frequenza: 0 = meno di una volta a settimana, 1 = una, 2 = due-tre, 3 = quasi ogni giorno;
+-    /// intensità: 0 = leggera, 5 = respiro affannato e sudore, 10 = quasi allo sfinimento; durata: 1 = < 30 min, 1,5 = ≥ 30 min.
+-    /// Qui ricavato dagli allenamenti degli ultimi 28 giorni (intensità dalla FC media rispetto alla massima).
++    public enum PAFrequency: Sendable, CaseIterable {
++        case never, lessThanWeekly, weekly, twoOrThreeWeekly, almostDaily
++    }
++
++    public enum PAIntensity: Double, Sendable, CaseIterable {
++        case light = 1, moderate = 2, vigorous = 3
++    }
++
++    public enum PADuration: Double, Sendable, CaseIterable {
++        case under15Minutes = 0.1, from15To29Minutes = 0.38
++        case from30To60Minutes = 0.75, over60Minutes = 1
++    }
++
++    /// Due codifiche pubblicate per la risposta "meno di una volta a settimana".
++    public enum PALessThanWeeklyPolicy: Double, Sendable, CaseIterable {
++        case zero = 0, half = 0.5
++    }
++
++    /// PA-index da questionario: frequenza x intensità x durata, scala 0-15.
++    /// Il default .zero adotta il protocollo HUNT 2012: https://pmc.ncbi.nlm.nih.gov/articles/PMC3445602/
++    /// La variante .half è esplicita: https://pmc.ncbi.nlm.nih.gov/articles/PMC3524509/
++    /// Questa scelta non certifica la codifica del full text Nes 2011, qui non verificato.
++    public static func paIndex(frequency: PAFrequency, intensity: PAIntensity, duration: PADuration,
++                               lessThanWeeklyPolicy: PALessThanWeeklyPolicy = .zero) -> Double {
++        let f: Double
++        switch frequency {
++        case .never: f = 0
++        case .lessThanWeekly: f = lessThanWeeklyPolicy.rawValue
++        case .weekly: f = 1
++        case .twoOrThreeWeekly: f = 2.5
++        case .almostDaily: f = 5
++        }
++        return f * intensity.rawValue * duration.rawValue
++    }
++
++    /// PROXY euristico del questionario dagli allenamenti, non un input HUNT direttamente misurato.
++    /// Conserva gli allenamenti di almeno 10 min; la frequenza settimanale e le soglie FCmax
++    /// 0,64/0,85 sono una nostra mappatura ai codici del questionario, non soglie validate HUNT.
++    /// La categoria rara usa esplicitamente la policy .zero del protocollo HUNT 2012.
+     public static func paIndex(workouts: [WorkoutRecord], days: Double = 28, hrMax: Double) -> Double {
++        guard days.isFinite, days > 0, hrMax.isFinite, hrMax > 0 else { return 0 }
+         let w = workouts.filter { $0.minutes >= 10 }
+-        guard !w.isEmpty, hrMax > 0 else { return 0 }
++        guard !w.isEmpty else { return 0 }
+         let perWeek = Double(w.count) / (days / 7)
+-        let freq: Double = perWeek < 0.5 ? 0 : perWeek < 1.5 ? 1 : perWeek < 3.5 ? 2 : 3
++        let frequency: PAFrequency = perWeek < 1 ? .lessThanWeekly : perWeek < 2 ? .weekly
++            : perWeek < 4 ? .twoOrThreeWeekly : .almostDaily
+         let rel = Stats.median(w.map { $0.avgHR / hrMax })
+-        let intensity: Double = rel < 0.64 ? 0 : rel < 0.85 ? 5 : 10
+-        let duration: Double = Stats.median(w.map { $0.minutes }) >= 30 ? 1.5 : 1
+-        return freq * intensity * duration
++        let intensity: PAIntensity = rel < 0.64 ? .light : rel < 0.85 ? .moderate : .vigorous
++        let minutes = Stats.median(w.map { $0.minutes })
++        let duration: PADuration = minutes < 15 ? .under15Minutes : minutes < 30 ? .from15To29Minutes
++            : minutes <= 60 ? .from30To60Minutes : .over60Minutes
++        return paIndex(frequency: frequency, intensity: intensity, duration: duration, lessThanWeeklyPolicy: .zero)
+     }
+ 
+-    /// Modello senza esercizio di Nes et al. 2011 (studio HUNT, n = 4631), versione con indice di massa corporea
++    /// Modello senza esercizio di Nes et al. 2011, versione con indice di massa corporea.
++    /// L'abstract riporta 4637 partecipanti iniziali: https://pubmed.ncbi.nlm.nih.gov/21502897/
+     public static func nes(profile p: UserProfile, rhr: Double, paIndex: Double) -> Estimate {
+         p.sex == .male
+             ? Estimate(name: "Nes", value: 92.05 - 0.327 * p.age - 0.933 * p.bmi - 0.167 * rhr + 0.257 * paIndex, see: 5.8)
+--- a/Tests/RingCoreTests/PipelineTests.swift
++++ b/Tests/RingCoreTests/PipelineTests.swift
+@@ -192,11 +192,11 @@
+         XCTAssertLessThan(Fitness.cardioAge(vo2: 45, sex: .male), Fitness.cardioAge(vo2: 38, sex: .male))
+         XCTAssertEqual(Fitness.smooth(previous: 30, raw: 40), 31.5, accuracy: 1e-9)
+         XCTAssertEqual(Fitness.smooth(previous: nil, raw: 40), 40)
+-        // indice di attività: 3 corse a settimana da 40 min a intensità moderata -> 2 x 5 x 1,5 = 15
++        // proxy del questionario: 3 corse/settimana, 40 min moderate -> 2,5 x 2 x 0,75 = 3,75
+         let t = testDay(1)
+         let w = (0..<12).map { WorkoutRecord(start: t.addingTimeInterval(Double($0) * 2.3 * 86_400), end: t.addingTimeInterval(Double($0) * 2.3 * 86_400 + 2400),
+                                              avgHR: 150, maxHR: 170, zoneMinutes: [0, 0, 20, 20, 0], kcal: 400, autoDetected: false) }
+-        XCTAssertEqual(Fitness.paIndex(workouts: w, hrMax: 190), 15)
++        XCTAssertEqual(Fitness.paIndex(workouts: w, hrMax: 190), 3.75)
+         XCTAssertEqual(Fitness.paIndex(workouts: [], hrMax: 190), 0)
+     }
+ 
+--- /dev/null
++++ b/Tests/RingCoreTests/FitnessTests.swift
+@@ -0,0 +1,104 @@
++import XCTest
++@testable import RingCore
++
++final class FitnessTests: XCTestCase {
++    private func workouts(_ count: Int, minutes: Double = 40, relativeHR: Double = 0.75) -> [WorkoutRecord] {
++        let start = Date(timeIntervalSince1970: 1_800_000_000)
++        return (0..<count).map { k in
++            let date = start.addingTimeInterval(Double(k) * 86_400)
++            return WorkoutRecord(start: date, end: date.addingTimeInterval(minutes * 60),
++                                 avgHR: relativeHR * 200, maxHR: 200, zoneMinutes: [],
++                                 kcal: 0, autoDetected: false)
++        }
++    }
++
++    func testQuestionnaireCodeTableAndRange() {
++        let frequencies: [(Fitness.PAFrequency, Double)] = [
++            (.never, 0), (.lessThanWeekly, 0), (.weekly, 1),
++            (.twoOrThreeWeekly, 2.5), (.almostDaily, 5)
++        ]
++        let intensities: [(Fitness.PAIntensity, Double)] = [(.light, 1), (.moderate, 2), (.vigorous, 3)]
++        let durations: [(Fitness.PADuration, Double)] = [
++            (.under15Minutes, 0.1), (.from15To29Minutes, 0.38),
++            (.from30To60Minutes, 0.75), (.over60Minutes, 1)
++        ]
++        for (frequency, f) in frequencies {
++            for (intensity, i) in intensities {
++                for (duration, d) in durations {
++                    let value = Fitness.paIndex(frequency: frequency, intensity: intensity, duration: duration)
++                    XCTAssertEqual(value, f * i * d, accuracy: 1e-12)
++                    XCTAssertGreaterThanOrEqual(value, 0)
++                    XCTAssertLessThanOrEqual(value, 15)
++                }
++            }
++        }
++        XCTAssertEqual(Fitness.paIndex(frequency: .almostDaily, intensity: .vigorous, duration: .over60Minutes), 15)
++    }
++
++    func testLessThanWeeklyPolicyIsExplicit() {
++        for policy in Fitness.PALessThanWeeklyPolicy.allCases {
++            XCTAssertEqual(Fitness.paIndex(frequency: .never, intensity: .vigorous,
++                                          duration: .over60Minutes, lessThanWeeklyPolicy: policy), 0)
++        }
++        XCTAssertEqual(Fitness.paIndex(frequency: .lessThanWeekly, intensity: .moderate,
++                                      duration: .from30To60Minutes), 0)
++        XCTAssertEqual(Fitness.paIndex(frequency: .lessThanWeekly, intensity: .moderate,
++                                      duration: .from30To60Minutes, lessThanWeeklyPolicy: .zero), 0)
++        XCTAssertEqual(Fitness.paIndex(frequency: .lessThanWeekly, intensity: .moderate,
++                                      duration: .from30To60Minutes, lessThanWeeklyPolicy: .half), 0.75)
++        for frequency in Fitness.PAFrequency.allCases where frequency != .lessThanWeekly {
++            XCTAssertEqual(Fitness.paIndex(frequency: frequency, intensity: .light, duration: .under15Minutes,
++                                          lessThanWeeklyPolicy: .zero),
++                           Fitness.paIndex(frequency: frequency, intensity: .light, duration: .under15Minutes,
++                                          lessThanWeeklyPolicy: .half))
++        }
++    }
++
++    func testProxyDurationBoundaries() {
++        // Una volta a settimana, intensità leggera: il risultato coincide con il codice durata.
++        let cases: [(Double, Double)] = [
++            (10, 0.1), (14.999, 0.1), (15, 0.38), (29.999, 0.38),
++            (30, 0.75), (60, 0.75), (60.001, 1)
++        ]
++        for (minutes, expected) in cases {
++            XCTAssertEqual(Fitness.paIndex(workouts: workouts(1, minutes: minutes, relativeHR: 0.5),
++                                           days: 7, hrMax: 200), expected, accuracy: 1e-12)
++        }
++        XCTAssertEqual(Fitness.paIndex(workouts: workouts(1, minutes: 9), days: 7, hrMax: 200), 0)
++    }
++
++    func testProxyFrequencyAndIntensityBoundaries() {
++        for (count, expected) in [(0, 0.0), (1, 1.0), (2, 2.5), (3, 2.5), (4, 5.0), (7, 5.0)] {
++            XCTAssertEqual(Fitness.paIndex(workouts: workouts(count, minutes: 61, relativeHR: 0.5),
++                                           days: 7, hrMax: 200), expected, accuracy: 1e-12)
++        }
++        XCTAssertEqual(Fitness.paIndex(workouts: workouts(1), days: 28, hrMax: 200), 0)
++        for (relativeHR, expected) in [(0.639, 1.0), (0.64, 2.0), (0.849, 2.0), (0.85, 3.0)] {
++            XCTAssertEqual(Fitness.paIndex(workouts: workouts(1, minutes: 61, relativeHR: relativeHR),
++                                           days: 7, hrMax: 200), expected, accuracy: 1e-12)
++        }
++        XCTAssertEqual(Fitness.paIndex(workouts: workouts(12), hrMax: 200), 3.75)
++        XCTAssertEqual(Fitness.paIndex(workouts: workouts(28, minutes: 61, relativeHR: 0.9), hrMax: 200), 15)
++    }
++
++    func testCorrectedPAIndexChangesOnlyNesActivityTerm() {
++        let corrected = Fitness.paIndex(workouts: workouts(12), hrMax: 200)
++        XCTAssertEqual(corrected, 3.75)
++        for (sex, expectedDelta) in [(Sex.male, -2.89125), (Sex.female, -2.39625)] {
++            let p = UserProfile(age: 40, sex: sex, heightCm: 175, weightKg: 70)
++            let old = Fitness.nes(profile: p, rhr: 60, paIndex: 15).value
++            let new = Fitness.nes(profile: p, rhr: 60, paIndex: corrected).value
++            XCTAssertEqual(new - old, expectedDelta, accuracy: 1e-10)
++        }
++    }
++
++    func testProxyRejectsInvalidDaysAndHRMax() {
++        let w = workouts(12)
++        let invalid: [Double] = [0, -1, .nan, .infinity, -.infinity]
++        for value in invalid {
++            XCTAssertEqual(Fitness.paIndex(workouts: w, days: value, hrMax: 200), 0)
++            XCTAssertEqual(Fitness.paIndex(workouts: w, days: 28, hrMax: value), 0)
++        }
++        XCTAssertEqual(Fitness.paIndex(workouts: [], days: 28, hrMax: 200), 0)
++    }
++}

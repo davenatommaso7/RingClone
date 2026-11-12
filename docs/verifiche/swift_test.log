@@ -1,0 +1,122 @@
+Building for debugging...
+[2 / 7] RingCore
+[6 / 12] RingCore
+[10 / 13] RingCoreTests-product
+[14 / 16] RingCoreTests-test-runner
+[17 / 17] RingCoreTests-test-runner
+Build complete! (1.82 secs)
+Test Suite 'All tests' started at 2026-11-10 13:25:52.602
+Test Suite 'Debug-linux-x86_64.xctest' started at 2026-11-10 13:25:52.604
+Test Suite 'FitnessTests' started at 2026-11-10 13:25:52.604
+Test Case 'FitnessTests.testCorrectedPAIndexChangesOnlyNesActivityTerm' started at 2026-11-10 13:25:52.604
+Test Case 'FitnessTests.testCorrectedPAIndexChangesOnlyNesActivityTerm' passed (0.001 seconds)
+Test Case 'FitnessTests.testLessThanWeeklyPolicyIsExplicit' started at 2026-11-10 13:25:52.604
+Test Case 'FitnessTests.testLessThanWeeklyPolicyIsExplicit' passed (0.0 seconds)
+Test Case 'FitnessTests.testProxyDurationBoundaries' started at 2026-11-10 13:25:52.604
+Test Case 'FitnessTests.testProxyDurationBoundaries' passed (0.0 seconds)
+Test Case 'FitnessTests.testProxyFrequencyAndIntensityBoundaries' started at 2026-11-10 13:25:52.604
+Test Case 'FitnessTests.testProxyFrequencyAndIntensityBoundaries' passed (0.0 seconds)
+Test Case 'FitnessTests.testProxyRejectsInvalidDaysAndHRMax' started at 2026-11-10 13:25:52.605
+Test Case 'FitnessTests.testProxyRejectsInvalidDaysAndHRMax' passed (0.0 seconds)
+Test Case 'FitnessTests.testQuestionnaireCodeTableAndRange' started at 2026-11-10 13:25:52.605
+Test Case 'FitnessTests.testQuestionnaireCodeTableAndRange' passed (0.0 seconds)
+Test Suite 'FitnessTests' passed at 2026-11-10 13:25:52.605
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'PipelineTests' started at 2026-11-10 13:25:52.605
+Test Case 'PipelineTests.testCardioAgeMovesSlowly' started at 2026-11-10 13:25:52.605
+Test Case 'PipelineTests.testCardioAgeMovesSlowly' passed (25.46 seconds)
+Test Case 'PipelineTests.testCircadianWindows' started at 2026-11-10 13:26:18.065
+Test Case 'PipelineTests.testCircadianWindows' passed (0.0 seconds)
+Test Case 'PipelineTests.testDayInputAssembly' started at 2026-11-10 13:26:18.065
+Test Case 'PipelineTests.testDayInputAssembly' passed (0.007 seconds)
+Test Case 'PipelineTests.testDaytimeStressLowersStressRhythm' started at 2026-11-10 13:26:18.072
+Test Case 'PipelineTests.testDaytimeStressLowersStressRhythm' passed (2.079 seconds)
+Test Case 'PipelineTests.testFitnessModels' started at 2026-11-10 13:26:20.151
+Test Case 'PipelineTests.testFitnessModels' passed (0.0 seconds)
+Test Case 'PipelineTests.testHealthKitWorkoutIsNotDuplicated' started at 2026-11-10 13:26:20.151
+Test Case 'PipelineTests.testHealthKitWorkoutIsNotDuplicated' passed (0.978 seconds)
+Test Case 'PipelineTests.testHistoryUpsertKeepsOrderAndLimit' started at 2026-11-10 13:26:21.129
+Test Case 'PipelineTests.testHistoryUpsertKeepsOrderAndLimit' passed (0.0 seconds)
+Test Case 'PipelineTests.testIllnessLowersRecoveryAndRaisesFlag' started at 2026-11-10 13:26:21.129
+Test Case 'PipelineTests.testIllnessLowersRecoveryAndRaisesFlag' passed (2.067 seconds)
+Test Case 'PipelineTests.testPipelineIsIdempotent' started at 2026-11-10 13:26:23.196
+Test Case 'PipelineTests.testPipelineIsIdempotent' passed (1.982 seconds)
+Test Case 'PipelineTests.testRecoveryIsSeventyFiveWhenEverythingIsAtBaseline' started at 2026-11-10 13:26:25.179
+Test Case 'PipelineTests.testRecoveryIsSeventyFiveWhenEverythingIsAtBaseline' passed (0.975 seconds)
+Test Case 'PipelineTests.testSocialJetlag' started at 2026-11-10 13:26:26.154
+Test Case 'PipelineTests.testSocialJetlag' passed (0.981 seconds)
+Test Case 'PipelineTests.testTypicalDayScoresAreInTheTypicalRange' started at 2026-11-10 13:26:27.135
+Test Case 'PipelineTests.testTypicalDayScoresAreInTheTypicalRange' passed (0.979 seconds)
+Test Case 'PipelineTests.testWorkoutDetectionEnergyAndMovement' started at 2026-11-10 13:26:28.114
+Test Case 'PipelineTests.testWorkoutDetectionEnergyAndMovement' passed (1.95 seconds)
+Test Suite 'PipelineTests' passed at 2026-11-10 13:26:30.064
+	 Executed 13 tests, with 0 failures (0 unexpected) in 37.459 (37.459) seconds
+Test Suite 'PresentationTests' started at 2026-11-10 13:26:30.064
+Test Case 'PresentationTests.testCardLinesUseTheRightUnits' started at 2026-11-10 13:26:30.064
+Test Case 'PresentationTests.testCardLinesUseTheRightUnits' passed (1.01 seconds)
+Test Case 'PresentationTests.testDurationsAndLabels' started at 2026-11-10 13:26:31.075
+Test Case 'PresentationTests.testDurationsAndLabels' passed (0.0 seconds)
+Test Case 'PresentationTests.testHypnogramRunsCoverTheNightWithoutGaps' started at 2026-11-10 13:26:31.075
+Test Case 'PresentationTests.testHypnogramRunsCoverTheNightWithoutGaps' passed (1.023 seconds)
+Test Case 'PresentationTests.testNumbersUseItalianFormat' started at 2026-11-10 13:26:32.098
+Test Case 'PresentationTests.testNumbersUseItalianFormat' passed (0.0 seconds)
+Test Case 'PresentationTests.testSleepSourcePrefersAppleWatchAndNeverMixesSources' started at 2026-11-10 13:26:32.098
+Test Case 'PresentationTests.testSleepSourcePrefersAppleWatchAndNeverMixesSources' passed (0.0 seconds)
+Test Suite 'PresentationTests' passed at 2026-11-10 13:26:32.098
+	 Executed 5 tests, with 0 failures (0 unexpected) in 2.034 (2.034) seconds
+Test Suite 'SignalTests' started at 2026-11-10 13:26:32.098
+Test Case 'SignalTests.testGapBetweenSeriesIsNotADifference' started at 2026-11-10 13:26:32.098
+Test Case 'SignalTests.testGapBetweenSeriesIsNotADifference' passed (0.001 seconds)
+Test Case 'SignalTests.testHRMaxUsesObservedPeaksRobustly' started at 2026-11-10 13:26:32.099
+Test Case 'SignalTests.testHRMaxUsesObservedPeaksRobustly' passed (0.0 seconds)
+Test Case 'SignalTests.testMotionAccumulatorStreaming' started at 2026-11-10 13:26:32.099
+Test Case 'SignalTests.testMotionAccumulatorStreaming' passed (0.03 seconds)
+Test Case 'SignalTests.testMotionArchivePersistsAndDeduplicates' started at 2026-11-10 13:26:32.129
+Test Case 'SignalTests.testMotionArchivePersistsAndDeduplicates' passed (0.004 seconds)
+Test Case 'SignalTests.testPPGBeatDetection' started at 2026-11-10 13:26:32.133
+Test Case 'SignalTests.testPPGBeatDetection' passed (0.015 seconds)
+Test Case 'SignalTests.testPPGInvertedSignalIsHandled' started at 2026-11-10 13:26:32.148
+Test Case 'SignalTests.testPPGInvertedSignalIsHandled' passed (0.006 seconds)
+Test Case 'SignalTests.testRMSSDKnownValueAndEctopicBeat' started at 2026-11-10 13:26:32.155
+Test Case 'SignalTests.testRMSSDKnownValueAndEctopicBeat' passed (0.002 seconds)
+Test Case 'SignalTests.testStepDetection' started at 2026-11-10 13:26:32.156
+Test Case 'SignalTests.testStepDetection' passed (0.009 seconds)
+Test Case 'SignalTests.testTemperatureNight' started at 2026-11-10 13:26:32.165
+Test Case 'SignalTests.testTemperatureNight' passed (0.0 seconds)
+Test Case 'SignalTests.testZones' started at 2026-11-10 13:26:32.166
+Test Case 'SignalTests.testZones' passed (0.0 seconds)
+Test Suite 'SignalTests' passed at 2026-11-10 13:26:32.166
+	 Executed 10 tests, with 0 failures (0 unexpected) in 0.067 (0.067) seconds
+Test Suite 'SleepTests' started at 2026-11-10 13:26:32.166
+Test Case 'SleepTests.testAppleStagesImproveStagingAndDefineThePeriod' started at 2026-11-10 13:26:32.166
+Test Case 'SleepTests.testAppleStagesImproveStagingAndDefineThePeriod' passed (1.013 seconds)
+Test Case 'SleepTests.testConsistency' started at 2026-11-10 13:26:33.179
+Test Case 'SleepTests.testConsistency' passed (0.0 seconds)
+Test Case 'SleepTests.testDeepSleepEarlyAndREMLate' started at 2026-11-10 13:26:33.179
+Test Case 'SleepTests.testDeepSleepEarlyAndREMLate' passed (1.018 seconds)
+Test Case 'SleepTests.testDurationAndRestorativeTargets' started at 2026-11-10 13:26:34.197
+Test Case 'SleepTests.testDurationAndRestorativeTargets' passed (0.0 seconds)
+Test Case 'SleepTests.testNapIsSeparateFromTheNight' started at 2026-11-10 13:26:34.197
+Test Case 'SleepTests.testNapIsSeparateFromTheNight' passed (1.03 seconds)
+Test Case 'SleepTests.testSensorOnlyNightMatchesGroundTruth' started at 2026-11-10 13:26:35.227
+Test Case 'SleepTests.testSensorOnlyNightMatchesGroundTruth' passed (3.019 seconds)
+Test Case 'SleepTests.testSensorOnlyStagingAgreementAndDeepShare' started at 2026-11-10 13:26:38.246
+Test Case 'SleepTests.testSensorOnlyStagingAgreementAndDeepShare' passed (4.026 seconds)
+Test Case 'SleepTests.testSleepDebt' started at 2026-11-10 13:26:42.273
+Test Case 'SleepTests.testSleepDebt' passed (0.0 seconds)
+Test Case 'SleepTests.testSleepRegularityIndex' started at 2026-11-10 13:26:42.273
+Test Case 'SleepTests.testSleepRegularityIndex' passed (0.001 seconds)
+Test Case 'SleepTests.testSleepStillInProgressIsNotReported' started at 2026-11-10 13:26:42.273
+Test Case 'SleepTests.testSleepStillInProgressIsNotReported' passed (0.728 seconds)
+Test Case 'SleepTests.testWatchNotWornIsNotSleep' started at 2026-11-10 13:26:43.001
+Test Case 'SleepTests.testWatchNotWornIsNotSleep' passed (0.063 seconds)
+Test Suite 'SleepTests' passed at 2026-11-10 13:26:43.064
+	 Executed 11 tests, with 0 failures (0 unexpected) in 10.898 (10.898) seconds
+Test Suite 'Debug-linux-x86_64.xctest' passed at 2026-11-10 13:26:43.064
+	 Executed 45 tests, with 0 failures (0 unexpected) in 50.46 (50.46) seconds
+Test Suite 'All tests' passed at 2026-11-10 13:26:43.064
+	 Executed 45 tests, with 0 failures (0 unexpected) in 50.46 (50.46) seconds
+◇ Test run started.
+↳ Testing Library Version: 6.4.2 (288a2328ff84644)
+↳ Target Platform: x86_64-unknown-linux-gnu
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.

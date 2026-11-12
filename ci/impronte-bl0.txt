@@ -1,0 +1,36 @@
+# Impronte git (SHA-1) dei file e delle cartelle della BL-0 (RingClone v2.1), verificate il 12 novembre 2026.
+# Il workflow di compilazione si ferma se una di queste impronte cambia.
+# I 21 file del motore con le formule e le 5 prove originali sono elencati uno per uno:
+# M1 puo' aggiungere file nuovi accanto a questi, ma non modificarli.
+Apps e6477d8b7b0711dce78f7d68908bb22948345902
+docs 3a6a7ae5ba0672b7b7078071e1e03200c8d98e87
+.gitignore 24b7abe114e29eb2e8a9fbe1def239120b9c83cf
+Package.swift 63e8952a3686c60c440d43cb5dc40d1173a7ebdf
+README.md 89a90b618fdac30b4dd842eff4ab9687c35a34bd
+project.yml acd049b92acf1db37d782678c3bd4eb47bbf022f
+Sources/RingCore/Activity.swift b562023ff415b7cc054a4f8988372788a5809030
+Sources/RingCore/Circadian.swift 796301e4c324e9aa4695124fd2b50f3b8db3c396
+Sources/RingCore/DSP.swift 532ce5f66aad4130cc7f1c7204b768b49424f8da
+Sources/RingCore/DailyPipeline.swift b1a609f8412caecc42bbb746674bb32d61025842
+Sources/RingCore/Fitness.swift 019b42c3b594ec8dbda951ded80f4c28fc7d07af
+Sources/RingCore/HRV.swift 86c74db53c6bb2d8e7b5f9c0d4e7feace90a8c43
+Sources/RingCore/HeartRate.swift 2a4123a958b148baa82de1f51f7bb5222638126a
+Sources/RingCore/History.swift fde143f2ce851e21e815de2ae78c32f72054c620
+Sources/RingCore/Models.swift 19a24b1c2ba71f84fe8c7d12d52af4739efa949d
+Sources/RingCore/Motion.swift 510abfe58118076cd6f42dd28195140c238d8384
+Sources/RingCore/PPG.swift cc61a72fd5cd32bea4670a985aa11d91806ccb06
+Sources/RingCore/Presentation.swift e4f5d6f2d4d8b40ea52d06c0bb4330858dee713b
+Sources/RingCore/Recovery.swift 87721cca9446c0f134a524f6baf6c4449de85523
+Sources/RingCore/SleepDetection.swift eaa86297c055f65ab50377c3ac0108fc29a0512b
+Sources/RingCore/SleepMetrics.swift e00c237b2148dff02ec7ae67c7be6ab18dfac142
+Sources/RingCore/SleepStaging.swift 3ce528de311bf635cf90b36a3dac1de537d4bc3b
+Sources/RingCore/Stats.swift 680fcb195bfc5245cb869fd14a495f2c3a52e6fe
+Sources/RingCore/Stress.swift c699f5fb591675b085b26c3eb9c5130c323d3796
+Sources/RingCore/Synthetic.swift 3cb80092d4d70a6d3ee2d5ca6531b448c6f36410
+Sources/RingCore/Temperature.swift 79719ae86c74d8156c011309178d254873aa8496
+Sources/RingCore/Transfer.swift 0bc3b62abdb2aec9c55dbd3a73b9e1136efcaac4
+Tests/RingCoreTests/FitnessTests.swift 72b8121cf0e101b405f5a76333469e59e1c8d117
+Tests/RingCoreTests/PipelineTests.swift 0cba04015eeb2d8bed080b3f74767a11139c64d6
+Tests/RingCoreTests/PresentationTests.swift d74ea817bfa2321133a5f65a575253381885b713
+Tests/RingCoreTests/SignalTests.swift 0f1c26cf1a56c987e5b3d3e24a1fb169ed3598e0
+Tests/RingCoreTests/SleepTests.swift 37274686bd6fa7bc16ac79159caf3a75620722d6

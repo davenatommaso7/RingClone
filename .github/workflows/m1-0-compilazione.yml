@@ -1,6 +1,7 @@
-# M1.0 - Compilazione remota della BL-0 (RingClone v2.1) cosi' com'e', senza firma e senza credenziali.
+# M1 - Compilazione remota di RingClone, senza firma e senza credenziali.
 # Canale A (decisione D-02): solo compilazione per simulatore. Nessun job di archiviazione o caricamento.
 # Questo workflow non usa segreti. Non aggiungere credenziali senza una nuova decisione (D-14).
+# Prima esecuzione sulla BL-0 cosi' com'e' (M1.0): esecuzione 43277969372, commit 5dd41a6bf1bd13a75537006f90c4aad676387ef3.
 #
 # Azioni fissate a un commit reale, letto dalla pagina della release il 12 novembre 2026:
 #   actions/checkout        v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1  https://github.com/actions/checkout/releases/tag/v7.0.1
@@ -8,7 +9,7 @@
 # XcodeGen 2.46.0: xcodegen.zip verificato con l'impronta SHA-256 pubblicata nella release
 #   https://github.com/yonaskolb/XcodeGen/releases/tag/2.46.0
 
-name: M1.0 - Compilazione BL-0 senza firma
+name: M1 - Compilazione senza firma
 
 on:
   workflow_dispatch:
@@ -29,7 +30,7 @@ concurrency:
 
 jobs:
   compila:
-    name: Compila la BL-0 per simulatore iPhone e Watch
+    name: Prove del motore e compilazione per simulatore iPhone e Watch
     runs-on: xcode-27
     timeout-minutes: 45
     defaults:
@@ -39,6 +40,7 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       XCODEGEN_VERSION: "2.46.0"
       XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+      IMPRONTE_ATTESE: "32"
     steps:
       - name: Scarica il repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,33 +58,34 @@ jobs:
         run: |
           false 2>&1 | tee "$RAPPORTO/errore_di_prova.log"
 
-      # Le impronte sono quelle git (SHA-1) delle cartelle e dei file della BL-0,
-      # verificate il 12 novembre 2026 sui 46 file originali.
-      # Quando M1 aggiungera' file in queste cartelle, l'elenco va aggiornato.
+      # L'elenco ci/impronte-bl0.txt contiene le impronte git (SHA-1) della BL-0:
+      # le cartelle Apps e docs, i file di radice, i 21 file del motore e le 5 prove originali.
+      # File nuovi accanto a quelli elencati sono ammessi; una modifica a un file elencato ferma l'esecuzione.
       - name: Verifica l'impronta della BL-0
         id: verifica
         run: |
           {
             echo "commit $(git rev-parse HEAD)"
             esito=0
+            controllati=0
             while read -r percorso atteso; do
-              trovato="$(git rev-parse "HEAD:$percorso")"
+              case "$percorso" in
+                ''|'#'*) continue ;;
+              esac
+              controllati=$((controllati + 1))
+              trovato="$(git rev-parse "HEAD:$percorso" 2>/dev/null || echo assente)"
               if [ "$trovato" = "$atteso" ]; then
                 echo "UGUALE  $percorso $trovato"
               else
                 echo "DIVERSO $percorso atteso=$atteso trovato=$trovato"
                 esito=1
               fi
-            done <<'ELENCO'
-          Sources 24c0b93b10d3821efb49eafc9c186274e5479a69
-          Apps e6477d8b7b0711dce78f7d68908bb22948345902
-          Tests 6c2a81c964e240c26a1de8758c68c29e90bad194
-          docs 3a6a7ae5ba0672b7b7078071e1e03200c8d98e87
-          .gitignore 24b7abe114e29eb2e8a9fbe1def239120b9c83cf
-          Package.swift 63e8952a3686c60c440d43cb5dc40d1173a7ebdf
-          README.md 89a90b618fdac30b4dd842eff4ab9687c35a34bd
-          project.yml acd049b92acf1db37d782678c3bd4eb47bbf022f
-          ELENCO
+            done < ci/impronte-bl0.txt
+            echo "voci controllate: $controllati, attese: $IMPRONTE_ATTESE"
+            if [ "$controllati" -ne "$IMPRONTE_ATTESE" ]; then
+              echo "DIVERSO il numero di voci dell'elenco non e' quello atteso"
+              esito=1
+            fi
             modifiche="$(git status --porcelain --untracked-files=all)"
             if [ -n "$modifiche" ]; then
               echo "DIVERSO la copia di lavoro non coincide con il commit"
@@ -156,7 +159,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee "$RAPPORTO/build_watch.log"
 
-      # Osservazione, non criterio: in M1.0 l'esito viene solo registrato.
+      # Osservazione, non criterio: l'esito viene solo registrato.
       - name: Controlla se l'app Watch e' incorporata nell'app iPhone
         id: incorporata
         if: ${{ !cancelled() && steps.iphone.outcome == 'success' }}
@@ -202,7 +205,7 @@ jobs:
             echo '~~~'
           }
           {
-            echo "## M1.0 - Compilazione della BL-0 senza firma"
+            echo "## M1 - Compilazione senza firma"
             echo
             echo "| Voce | Esito |"
             echo "|---|---|"
@@ -231,7 +234,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: rapporto-m1-0
+          name: rapporto-m1
           path: ${{ runner.temp }}/rapporto
           retention-days: 7
           if-no-files-found: warn

@@ -1,0 +1,48 @@
+# Progetto delle app di M1, generato con XcodeGen: xcodegen generate --spec project-m1.yml
+# Separato da project.yml, che resta quello della BL-0 e non viene modificato.
+# Le app di M1 stanno nella cartella M1/, fuori da Apps/, perche' i bersagli della BL-0 compilano tutta Apps/.
+# In M1 il Watch e' un guscio: nessuna modalita' di background, nessun permesso di movimento o di Salute.
+name: RingCloneM1
+options:
+  bundleIdPrefix: it.ringclone
+  deploymentTarget:
+    iOS: "17.0"
+    watchOS: "10.0"
+packages:
+  RingCore:
+    path: .
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    DEVELOPMENT_TEAM: ""
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  RingCloneM1:
+    type: application
+    platform: iOS
+    sources: [M1/iOS, M1/Shared]
+    dependencies:
+      - package: RingCore
+      - target: RingCloneM1Watch
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: it.ringclone.m1
+    info:
+      path: M1/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: Ring M1
+        UILaunchScreen: {}
+  RingCloneM1Watch:
+    type: application
+    platform: watchOS
+    sources: [M1/watchOS, M1/Shared]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: it.ringclone.m1.watchkitapp
+    info:
+      path: M1/watchOS/Info.plist
+      properties:
+        CFBundleDisplayName: Ring M1
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: it.ringclone.m1

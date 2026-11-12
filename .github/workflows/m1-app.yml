@@ -1,0 +1,194 @@
+# M1 - Compilazione delle app di M1 (project-m1.yml), senza firma e senza credenziali.
+# Affianca m1-0-compilazione.yml, che verifica le impronte della BL-0 ed esegue le prove del motore.
+# Questo workflow non usa segreti. Non aggiungere credenziali senza una nuova decisione (D-14).
+#
+# Azioni fissate a un commit reale, letto dalla pagina della release il 12 novembre 2026:
+#   actions/checkout        v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1  https://github.com/actions/checkout/releases/tag/v7.0.1
+#   actions/upload-artifact v7.0.2  cf430e030ddbb5b0abf93d22962f4752f3646cd9  https://github.com/actions/upload-artifact/releases/tag/v7.0.2
+# XcodeGen 2.46.0: xcodegen.zip verificato con l'impronta SHA-256 pubblicata nella release
+#   https://github.com/yonaskolb/XcodeGen/releases/tag/2.46.0
+
+name: M1 - App di M1 senza firma
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m1-app-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compila:
+    name: Controlli statici e compilazione delle app di M1 per simulatore
+    runs-on: xcode-27
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepara la cartella del rapporto
+        run: |
+          mkdir -p "$RUNNER_TEMP/rapporto"
+          echo "RAPPORTO=$RUNNER_TEMP/rapporto" >> "$GITHUB_ENV"
+
+      # Criterio CA-14: nel bersaglio Watch non compaiono allenamento, zona, movimento o Salute,
+      # e il progetto di M1 non dichiara modalita' di background ne' permessi di funzioni assenti.
+      - name: Controlli statici sul guscio del Watch
+        id: statici
+        run: |
+          {
+            esito=0
+            if grep -rnE 'Zona|HKWorkout|WorkoutManager|CMSensorRecorder|CoreMotion|HealthKit' M1/watchOS M1/Shared; then
+              echo "TROVATO nei sorgenti del Watch un riferimento non ammesso in M1"
+              esito=1
+            else
+              echo "ASSENTE nei sorgenti del Watch: Zona, HKWorkout, WorkoutManager, CMSensorRecorder, CoreMotion, HealthKit"
+            fi
+            if grep -nE 'WKBackgroundModes|UIBackgroundModes|BGTaskScheduler|NSMotionUsageDescription' project-m1.yml; then
+              echo "TROVATA in project-m1.yml una dichiarazione non ammessa in M1"
+              esito=1
+            else
+              echo "ASSENTE in project-m1.yml: WKBackgroundModes, UIBackgroundModes, BGTaskScheduler, NSMotionUsageDescription"
+            fi
+            exit "$esito"
+          } 2>&1 | tee "$RAPPORTO/statici.txt"
+
+      - name: Installa XcodeGen alla versione fissata
+        id: xcodegen
+        run: |
+          test -d "$DEVELOPER_DIR"
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --output xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  xcodegen.zip" | shasum -a 256 --check
+          unzip -q xcodegen.zip
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          {
+            xcodebuild -version
+            swift --version
+            echo "XcodeGen:"
+            "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
+          } 2>&1 | tee "$RAPPORTO/versioni.txt"
+
+      - name: Genera il progetto di M1
+        id: genera
+        if: ${{ !cancelled() && steps.xcodegen.outcome == 'success' }}
+        run: |
+          xcodegen generate --spec project-m1.yml 2>&1 | tee "$RAPPORTO/xcodegen.log"
+          xcodebuild -list -project RingCloneM1.xcodeproj 2>&1 | tee "$RAPPORTO/schemi.txt"
+
+      - name: Compila l'app iPhone di M1 per simulatore
+        id: iphone
+        if: ${{ !cancelled() && steps.genera.outcome == 'success' }}
+        run: |
+          xcodebuild build \
+            -project RingCloneM1.xcodeproj \
+            -scheme RingCloneM1 \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-M1-iPhone" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RAPPORTO/build_m1_iphone.log"
+
+      - name: Compila l'app Watch di M1 per simulatore
+        id: watch
+        if: ${{ !cancelled() && steps.genera.outcome == 'success' }}
+        run: |
+          xcodebuild build \
+            -project RingCloneM1.xcodeproj \
+            -scheme RingCloneM1Watch \
+            -configuration Debug \
+            -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-M1-Watch" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RAPPORTO/build_m1_watch.log"
+
+      # Criterio CA-13: l'app Watch deve risultare incorporata nel prodotto dell'app iPhone.
+      - name: Verifica che l'app Watch sia incorporata nell'app iPhone
+        id: incorporata
+        if: ${{ !cancelled() && steps.iphone.outcome == 'success' }}
+        run: |
+          {
+            trovate="$(find "$RUNNER_TEMP/DerivedData-M1-iPhone/Build/Products" -type d -path '*/RingCloneM1.app/Watch/*.app' -prune -print)"
+            if [ -n "$trovate" ]; then
+              echo "APP WATCH INCORPORATA: si"
+              echo "$trovate"
+            else
+              echo "APP WATCH INCORPORATA: no"
+              exit 1
+            fi
+          } 2>&1 | tee "$RAPPORTO/watch_incorporata.txt"
+
+      - name: Scrive il rapporto
+        if: ${{ always() }}
+        env:
+          ESITO_STATICI: ${{ steps.statici.outcome }}
+          ESITO_XCODEGEN: ${{ steps.xcodegen.outcome }}
+          ESITO_GENERA: ${{ steps.genera.outcome }}
+          ESITO_IPHONE: ${{ steps.iphone.outcome }}
+          ESITO_WATCH: ${{ steps.watch.outcome }}
+          ESITO_INCORPORATA: ${{ steps.incorporata.outcome }}
+        run: |
+          RAPPORTO="${RAPPORTO:-$RUNNER_TEMP/rapporto}"
+          mkdir -p "$RAPPORTO"
+          conta() {
+            if [ -f "$1" ]; then grep -c "$2" "$1" || true; else echo "n.d."; fi
+          }
+          for nome in iphone watch; do
+            if [ -f "$RAPPORTO/build_m1_$nome.log" ]; then
+              grep -n 'error:' "$RAPPORTO/build_m1_$nome.log" | head -n 40 > "$RAPPORTO/errori_$nome.txt" || true
+            fi
+          done
+          allega() {
+            echo
+            echo "### $1"
+            echo
+            echo '~~~'
+            if [ -f "$2" ]; then cat "$2"; else echo "non disponibile"; fi
+            echo '~~~'
+          }
+          {
+            echo "## M1 - App di M1 senza firma"
+            echo
+            echo "| Voce | Esito |"
+            echo "|---|---|"
+            echo "| Commit | $GITHUB_SHA |"
+            echo "| Esecuzione | $GITHUB_RUN_ID, tentativo $GITHUB_RUN_ATTEMPT |"
+            echo "| Controlli statici sul guscio del Watch | ${ESITO_STATICI:-non eseguito} |"
+            echo "| Installazione di XcodeGen | ${ESITO_XCODEGEN:-non eseguito} |"
+            echo "| Generazione del progetto di M1 | ${ESITO_GENERA:-non eseguito} |"
+            echo "| Compilazione iPhone di M1 | ${ESITO_IPHONE:-non eseguito} |"
+            echo "| Avvisi iPhone (righe con warning:) | $(conta "$RAPPORTO/build_m1_iphone.log" 'warning:') |"
+            echo "| Errori iPhone (righe con error:) | $(conta "$RAPPORTO/build_m1_iphone.log" 'error:') |"
+            echo "| Compilazione Watch di M1 | ${ESITO_WATCH:-non eseguito} |"
+            echo "| Avvisi Watch (righe con warning:) | $(conta "$RAPPORTO/build_m1_watch.log" 'warning:') |"
+            echo "| Errori Watch (righe con error:) | $(conta "$RAPPORTO/build_m1_watch.log" 'error:') |"
+            echo "| App Watch incorporata | ${ESITO_INCORPORATA:-non eseguito} |"
+            allega "Controlli statici" "$RAPPORTO/statici.txt"
+            allega "Schemi e bersagli" "$RAPPORTO/schemi.txt"
+            allega "Righe con error: (iPhone)" "$RAPPORTO/errori_iphone.txt"
+            allega "Righe con error: (Watch)" "$RAPPORTO/errori_watch.txt"
+          } 2>&1 | tee "$RAPPORTO/rapporto.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Conserva il rapporto e i log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rapporto-m1-app
+          path: ${{ runner.temp }}/rapporto
+          retention-days: 7
+          if-no-files-found: warn

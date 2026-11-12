@@ -34,7 +34,7 @@ targets:
       properties:
         CFBundleDisplayName: Ring M1
         UILaunchScreen: {}
-        NSHealthShareUsageDescription: "RingClone legge da Salute frequenza cardiaca, passi e sonno per mostrarti i valori importati con la loro provenienza. Non scrive dati in Salute."
+        NSHealthShareUsageDescription: "RingClone legge da Salute, in sola lettura: frequenza cardiaca e frequenza a riposo, variabilità SDNN e serie battito-battito, passi, sonno, frequenza respiratoria, saturazione di ossigeno, temperatura al polso nel sonno, energia attiva e basale, VO2 max, tempo alla luce diurna e allenamenti. Li mostra come valori importati, con la loro provenienza. Non scrive dati in Salute."
     entitlements:
       path: M1/iOS/RingCloneM1.entitlements
       properties:

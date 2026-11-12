@@ -121,7 +121,7 @@ struct SeriesRows: View {
         if item.summary.provenance.state == .present {
             if item.showsRange {
                 ValueLine(label: "Minimo e massimo (\(item.summary.provenance.unit))",
-                          value: "\(ImportedFormat.number(item.summary.minimum)) - \(ImportedFormat.number(item.summary.maximum))")
+                          value: "\(ImportedFormat.number(item.summary.minimum, decimals: item.decimals)) - \(ImportedFormat.number(item.summary.maximum, decimals: item.decimals))")
             }
             if let note = item.admissibleNote {
                 ValueLine(label: note, value: "\(item.summary.provenance.outOfRangeCount)")
@@ -129,13 +129,17 @@ struct SeriesRows: View {
             if item.showsTotals {
                 ForEach(item.summary.perSourceSum.keys.sorted(), id: \.self) { source in
                     ValueLine(label: "Totale della sorgente \(source) (\(item.summary.provenance.unit))",
-                              value: ImportedFormat.number(item.summary.perSourceSum[source]))
+                              value: ImportedFormat.number(item.summary.perSourceSum[source], decimals: item.decimals))
                 }
                 ValueLine(label: "Totale secondo la statistica di Salute (\(item.summary.provenance.unit))",
-                          value: item.statisticNote ?? ImportedFormat.number(item.summary.healthStatisticTotal))
-                if item.summary.duplicateUUIDCount > 0 {
-                    ValueLine(label: "Campioni con identificativo ripetuto", value: "\(item.summary.duplicateUUIDCount)")
-                }
+                          value: item.statisticNote
+                              ?? ImportedFormat.number(item.summary.healthStatisticTotal, decimals: item.decimals))
+            }
+            if item.summary.duplicateUUIDCount > 0 {
+                ValueLine(label: "Campioni con identificativo ripetuto", value: "\(item.summary.duplicateUUIDCount)")
+            }
+            ForEach(item.details.indices, id: \.self) { index in
+                ValueLine(label: item.details[index].label, value: item.details[index].value)
             }
         }
     }
@@ -195,16 +199,18 @@ struct ImportedDataView: View {
         case .unavailable:
             Text("Salute non è disponibile su questo dispositivo.").padding()
         case .needsPermission:
-            VStack(alignment: .leading, spacing: 16) {
-                Text("RingClone legge da Salute tre tipi di dati: frequenza cardiaca, passi e sonno.")
-                Text("Li mostra così come sono, con la loro provenienza. Non conserva copie dei valori e non scrive in Salute.")
-                Text("Nel prossimo passaggio iOS ti chiede quali tipi consentire: puoi scegliere tipo per tipo.")
-                Button("Continua") {
-                    Task { await model.requestPermissionAndRead() }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("RingClone legge da Salute questi tipi di dati: frequenza cardiaca e frequenza a riposo, variabilità SDNN e serie battito-battito, passi, sonno, frequenza respiratoria, saturazione di ossigeno, temperatura al polso nel sonno, energia attiva e basale, VO2 max, tempo alla luce diurna e allenamenti.")
+                    Text("Li mostra così come sono, con la loro provenienza. Non conserva copie dei valori e non scrive in Salute.")
+                    Text("Nel prossimo passaggio iOS ti chiede quali tipi consentire: puoi scegliere tipo per tipo.")
+                    Button("Continua") {
+                        Task { await model.requestPermissionAndRead() }
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
-                .buttonStyle(.borderedProminent)
+                .padding()
             }
-            .padding()
         case .permissionError(let text):
             VStack(alignment: .leading, spacing: 16) {
                 Text("Errore nella richiesta dei permessi: \(text)")
@@ -216,13 +222,15 @@ struct ImportedDataView: View {
         case .done:
             if let result = model.result {
                 List {
-                    ForEach(result.items) { item in
-                        Section(header: Text(item.title)) {
-                            SeriesRows(item: item)
+                    ForEach(result.sections) { section in
+                        Section(header: Text(section.title)) {
+                            switch section {
+                            case .series(let item):
+                                SeriesRows(item: item)
+                            case .sleep(let series):
+                                SleepRows(series: series)
+                            }
                         }
-                    }
-                    Section(header: Text("Sonno")) {
-                        SleepRows(series: result.sleep)
                     }
                     Section {
                         Text("Valori importati da Salute, mostrati senza elaborazioni. Questa app non è un dispositivo medico.")

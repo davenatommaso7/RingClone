@@ -1,0 +1,237 @@
+# M1.0 - Compilazione remota della BL-0 (RingClone v2.1) cosi' com'e', senza firma e senza credenziali.
+# Canale A (decisione D-02): solo compilazione per simulatore. Nessun job di archiviazione o caricamento.
+# Questo workflow non usa segreti. Non aggiungere credenziali senza una nuova decisione (D-14).
+#
+# Azioni fissate a un commit reale, letto dalla pagina della release il 12 novembre 2026:
+#   actions/checkout        v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1  https://github.com/actions/checkout/releases/tag/v7.0.1
+#   actions/upload-artifact v7.0.2  cf430e030ddbb5b0abf93d22962f4752f3646cd9  https://github.com/actions/upload-artifact/releases/tag/v7.0.2
+# XcodeGen 2.46.0: xcodegen.zip verificato con l'impronta SHA-256 pubblicata nella release
+#   https://github.com/yonaskolb/XcodeGen/releases/tag/2.46.0
+
+name: M1.0 - Compilazione BL-0 senza firma
+
+on:
+  workflow_dispatch:
+    inputs:
+      errore_di_prova:
+        description: "Introduce apposta un comando fallito: l'esecuzione deve risultare fallita (criterio CA-10)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: m1-0-compilazione-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  compila:
+    name: Compila la BL-0 per simulatore iPhone e Watch
+    runs-on: xcode-27
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      XCODEGEN_VERSION: "2.46.0"
+      XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    steps:
+      - name: Scarica il repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepara la cartella del rapporto
+        run: |
+          mkdir -p "$RUNNER_TEMP/rapporto"
+          echo "RAPPORTO=$RUNNER_TEMP/rapporto" >> "$GITHUB_ENV"
+          echo "INIZIO_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Errore introdotto apposta (solo su richiesta)
+        if: ${{ inputs.errore_di_prova == true }}
+        run: |
+          false 2>&1 | tee "$RAPPORTO/errore_di_prova.log"
+
+      # Le impronte sono quelle git (SHA-1) delle cartelle e dei file della BL-0,
+      # verificate il 12 novembre 2026 sui 46 file originali.
+      # Quando M1 aggiungera' file in queste cartelle, l'elenco va aggiornato.
+      - name: Verifica l'impronta della BL-0
+        id: verifica
+        run: |
+          {
+            echo "commit $(git rev-parse HEAD)"
+            esito=0
+            while read -r percorso atteso; do
+              trovato="$(git rev-parse "HEAD:$percorso")"
+              if [ "$trovato" = "$atteso" ]; then
+                echo "UGUALE  $percorso $trovato"
+              else
+                echo "DIVERSO $percorso atteso=$atteso trovato=$trovato"
+                esito=1
+              fi
+            done <<'ELENCO'
+          Sources 24c0b93b10d3821efb49eafc9c186274e5479a69
+          Apps e6477d8b7b0711dce78f7d68908bb22948345902
+          Tests 6c2a81c964e240c26a1de8758c68c29e90bad194
+          docs 3a6a7ae5ba0672b7b7078071e1e03200c8d98e87
+          .gitignore 24b7abe114e29eb2e8a9fbe1def239120b9c83cf
+          Package.swift 63e8952a3686c60c440d43cb5dc40d1173a7ebdf
+          README.md 89a90b618fdac30b4dd842eff4ab9687c35a34bd
+          project.yml acd049b92acf1db37d782678c3bd4eb47bbf022f
+          ELENCO
+            modifiche="$(git status --porcelain --untracked-files=all)"
+            if [ -n "$modifiche" ]; then
+              echo "DIVERSO la copia di lavoro non coincide con il commit"
+              echo "$modifiche"
+              esito=1
+            fi
+            exit "$esito"
+          } 2>&1 | tee "$RAPPORTO/impronte.txt"
+
+      - name: Registra le versioni degli strumenti
+        id: versioni
+        run: |
+          test -d "$DEVELOPER_DIR"
+          {
+            sw_vers
+            echo "ImageOS=${ImageOS:-} ImageVersion=${ImageVersion:-}"
+            xcodebuild -version
+            swift --version
+          } 2>&1 | tee "$RAPPORTO/versioni.txt"
+
+      - name: Installa XcodeGen alla versione fissata
+        id: xcodegen
+        run: |
+          cd "$RUNNER_TEMP"
+          curl --fail --silent --show-error --location --output xcodegen.zip \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  xcodegen.zip" | shasum -a 256 --check
+          unzip -q xcodegen.zip
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          {
+            echo "XcodeGen:"
+            "$RUNNER_TEMP/xcodegen/bin/xcodegen" --version
+          } 2>&1 | tee -a "$RAPPORTO/versioni.txt"
+
+      - name: Prove del motore RingCore
+        id: motore
+        if: ${{ !cancelled() && steps.verifica.outcome == 'success' }}
+        run: |
+          swift test 2>&1 | tee "$RAPPORTO/swift_test.log"
+
+      - name: Genera il progetto con XcodeGen
+        id: genera
+        if: ${{ !cancelled() && steps.verifica.outcome == 'success' && steps.xcodegen.outcome == 'success' }}
+        run: |
+          xcodegen generate --spec project.yml 2>&1 | tee "$RAPPORTO/xcodegen.log"
+          xcodebuild -list -project RingClone.xcodeproj 2>&1 | tee "$RAPPORTO/schemi.txt"
+
+      - name: Compila l'app iPhone per simulatore
+        id: iphone
+        if: ${{ !cancelled() && steps.genera.outcome == 'success' }}
+        run: |
+          xcodebuild build \
+            -project RingClone.xcodeproj \
+            -scheme RingClone \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-iPhone" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RAPPORTO/build_iphone.log"
+
+      - name: Compila l'app Watch per simulatore
+        id: watch
+        if: ${{ !cancelled() && steps.genera.outcome == 'success' }}
+        run: |
+          xcodebuild build \
+            -project RingClone.xcodeproj \
+            -scheme RingCloneWatch \
+            -configuration Debug \
+            -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-Watch" \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RAPPORTO/build_watch.log"
+
+      # Osservazione, non criterio: in M1.0 l'esito viene solo registrato.
+      - name: Controlla se l'app Watch e' incorporata nell'app iPhone
+        id: incorporata
+        if: ${{ !cancelled() && steps.iphone.outcome == 'success' }}
+        run: |
+          {
+            trovate="$(find "$RUNNER_TEMP/DerivedData-iPhone/Build/Products" -type d -path '*/RingClone.app/Watch/*.app' -prune -print)"
+            if [ -n "$trovate" ]; then
+              echo "APP WATCH INCORPORATA: si"
+              echo "$trovate"
+            else
+              echo "APP WATCH INCORPORATA: no"
+            fi
+          } 2>&1 | tee "$RAPPORTO/watch_incorporata.txt"
+
+      - name: Scrive il rapporto
+        if: ${{ always() }}
+        env:
+          ESITO_VERIFICA: ${{ steps.verifica.outcome }}
+          ESITO_VERSIONI: ${{ steps.versioni.outcome }}
+          ESITO_XCODEGEN: ${{ steps.xcodegen.outcome }}
+          ESITO_MOTORE: ${{ steps.motore.outcome }}
+          ESITO_GENERA: ${{ steps.genera.outcome }}
+          ESITO_IPHONE: ${{ steps.iphone.outcome }}
+          ESITO_WATCH: ${{ steps.watch.outcome }}
+          ESITO_INCORPORATA: ${{ steps.incorporata.outcome }}
+        run: |
+          RAPPORTO="${RAPPORTO:-$RUNNER_TEMP/rapporto}"
+          mkdir -p "$RAPPORTO"
+          fine="$(date +%s)"
+          inizio="${INIZIO_EPOCH:-$fine}"
+          conta() {
+            if [ -f "$1" ]; then grep -c "$2" "$1" || true; else echo "n.d."; fi
+          }
+          riga() {
+            if [ -f "$1" ]; then grep -E "$2" "$1" | tail -n 1 || true; fi
+          }
+          allega() {
+            echo
+            echo "### $1"
+            echo
+            echo '~~~'
+            if [ -f "$2" ]; then cat "$2"; else echo "non disponibile"; fi
+            echo '~~~'
+          }
+          {
+            echo "## M1.0 - Compilazione della BL-0 senza firma"
+            echo
+            echo "| Voce | Esito |"
+            echo "|---|---|"
+            echo "| Commit | $GITHUB_SHA |"
+            echo "| Esecuzione | $GITHUB_RUN_ID, tentativo $GITHUB_RUN_ATTEMPT |"
+            echo "| Impronta della BL-0 | ${ESITO_VERIFICA:-non eseguito} |"
+            echo "| Versioni degli strumenti | ${ESITO_VERSIONI:-non eseguito} |"
+            echo "| Installazione di XcodeGen | ${ESITO_XCODEGEN:-non eseguito} |"
+            echo "| Prove del motore | ${ESITO_MOTORE:-non eseguito} |"
+            echo "| Riepilogo delle prove | $(riga "$RAPPORTO/swift_test.log" 'Executed [0-9]+ tests') |"
+            echo "| Generazione del progetto | ${ESITO_GENERA:-non eseguito} |"
+            echo "| Compilazione iPhone | ${ESITO_IPHONE:-non eseguito} |"
+            echo "| Avvisi iPhone (righe con warning:) | $(conta "$RAPPORTO/build_iphone.log" 'warning:') |"
+            echo "| Errori iPhone (righe con error:) | $(conta "$RAPPORTO/build_iphone.log" 'error:') |"
+            echo "| Compilazione Watch | ${ESITO_WATCH:-non eseguito} |"
+            echo "| Avvisi Watch (righe con warning:) | $(conta "$RAPPORTO/build_watch.log" 'warning:') |"
+            echo "| Errori Watch (righe con error:) | $(conta "$RAPPORTO/build_watch.log" 'error:') |"
+            echo "| App Watch incorporata | $(riga "$RAPPORTO/watch_incorporata.txt" 'APP WATCH INCORPORATA') |"
+            echo "| Durata fino al rapporto | $(( (fine - inizio) / 60 )) min $(( (fine - inizio) % 60 )) s |"
+            allega "Impronte" "$RAPPORTO/impronte.txt"
+            allega "Versioni" "$RAPPORTO/versioni.txt"
+            allega "Schemi e bersagli" "$RAPPORTO/schemi.txt"
+          } 2>&1 | tee "$RAPPORTO/rapporto.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Conserva il rapporto e i log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rapporto-m1-0
+          path: ${{ runner.temp }}/rapporto
+          retention-days: 7
+          if-no-files-found: warn

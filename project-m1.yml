@@ -2,6 +2,7 @@
 # Separato da project.yml, che resta quello della BL-0 e non viene modificato.
 # Le app di M1 stanno nella cartella M1/, fuori da Apps/, perche' i bersagli della BL-0 compilano tutta Apps/.
 # In M1 il Watch e' un guscio: nessuna modalita' di background, nessun permesso di movimento o di Salute.
+# L'iPhone legge Salute in sola lettura: il testo del permesso elenca i tipi realmente letti.
 name: RingCloneM1
 options:
   bundleIdPrefix: it.ringclone
@@ -33,6 +34,11 @@ targets:
       properties:
         CFBundleDisplayName: Ring M1
         UILaunchScreen: {}
+        NSHealthShareUsageDescription: "RingClone legge da Salute frequenza cardiaca, passi e sonno per mostrarti i valori importati con la loro provenienza. Non scrive dati in Salute."
+    entitlements:
+      path: M1/iOS/RingCloneM1.entitlements
+      properties:
+        com.apple.developer.healthkit: true
   RingCloneM1Watch:
     type: application
     platform: watchOS

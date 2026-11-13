@@ -201,7 +201,7 @@ struct ImportedDataView: View {
         case .needsPermission:
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("RingClone legge da Salute questi tipi di dati: frequenza cardiaca e frequenza a riposo, variabilità SDNN e serie battito-battito, passi, sonno, frequenza respiratoria, saturazione di ossigeno, temperatura al polso nel sonno, energia attiva e basale, VO2 max, tempo alla luce diurna e allenamenti.")
+                    Text("RingClone legge da Salute questi tipi di dati: frequenza cardiaca e frequenza a riposo, variabilità SDNN e RMSSD, serie battito-battito, passi, sonno, frequenza respiratoria, saturazione di ossigeno, temperatura al polso nel sonno, energia attiva e basale, VO2 max, tempo alla luce diurna e allenamenti.")
                     Text("Li mostra così come sono, con la loro provenienza. Non conserva copie dei valori e non scrive in Salute.")
                     Text("Nel prossimo passaggio iOS ti chiede quali tipi consentire: puoi scegliere tipo per tipo.")
                     Button("Continua") {

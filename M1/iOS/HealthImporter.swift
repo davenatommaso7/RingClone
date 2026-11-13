@@ -5,7 +5,7 @@ import RingCore
 // Importatore di M1 (voci ACQ-01 ... ACQ-14, ACQ-20, PLT-15).
 // Legge Salute in sola lettura e produce riepiloghi con provenienza.
 // Non passa dall'elaborazione giornaliera della BL-0 e non conserva nulla: ogni apertura rilegge.
-// La variabilita' RMSSD nativa non e' ancora letta: verra' aggiunta in un passo separato.
+// La variabilita' RMSSD nativa e' letta solo dove il sistema la fornisce (da iOS 27): solo il numero di campioni.
 
 struct ImportedDetail {
     let label: String
@@ -117,6 +117,9 @@ final class HealthImporter: @unchecked Sendable {
         types.insert(HKCategoryType(.sleepAnalysis))
         types.insert(HKSeriesType.heartbeat())
         types.insert(HKObjectType.workoutType())
+        if #available(iOS 27.0, *) {
+            types.insert(HKQuantityType(.heartRateVariabilityRMSSD))
+        }
         return types
     }
 
@@ -160,6 +163,11 @@ final class HealthImporter: @unchecked Sendable {
 
         let beats = await heartbeatItem(night: night, zone: zone)
         sections.append(.series(beats))
+
+        if #available(iOS 27.0, *) {
+            let rmssd = await nativeRMSSDItem(night: night, zone: zone)
+            sections.append(.series(rmssd))
+        }
 
         for plan in plans.dropFirst(3) {
             let entry = await item(for: plan, day: day, night: night, zone: zone)
@@ -213,6 +221,23 @@ final class HealthImporter: @unchecked Sendable {
             typeIdentifier: "HKDataTypeIdentifierHeartbeatSeries", unit: "serie", read: read, requested: night,
             timeZoneIdentifier: zone, hasDuration: true, readAt: Date())
         return ImportedItem(id: summary.provenance.typeIdentifier, title: "Serie battito-battito", summary: summary,
+                            showsRange: false, showsTotals: false, decimals: 0,
+                            admissibleNote: nil, statisticNote: nil, details: [])
+    }
+
+    /// Variabilita' RMSSD nativa: solo il numero di campioni. I valori non vengono letti ne' mostrati.
+    @available(iOS 27.0, *)
+    private func nativeRMSSDItem(night: ImportInterval, zone: String) async -> ImportedItem {
+        let type = HKQuantityType(.heartRateVariabilityRMSSD)
+        let read: ImportRead<ImportedSample> = await fetch(type, in: night) { sample in
+            ImportedSample(uuid: sample.uuid.uuidString, start: sample.startDate, end: sample.endDate,
+                           value: 0, source: sample.sourceRevision.source.name)
+        }
+        let summary = ImportedSeries.summarize(
+            typeIdentifier: HKQuantityTypeIdentifier.heartRateVariabilityRMSSD.rawValue, unit: "campioni",
+            read: read, requested: night, timeZoneIdentifier: zone, hasDuration: false, readAt: Date())
+        return ImportedItem(id: summary.provenance.typeIdentifier,
+                            title: "Variabilità RMSSD nativa (solo numero di campioni)", summary: summary,
                             showsRange: false, showsTotals: false, decimals: 0,
                             admissibleNote: nil, statisticNote: nil, details: [])
     }

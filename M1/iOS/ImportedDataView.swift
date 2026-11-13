@@ -46,7 +46,9 @@ final class ImportModel: ObservableObject {
 
     func read() async {
         phase = .reading
-        result = await importer.read()
+        let latest = await importer.read()
+        result = latest
+        DiagnosticRegistry.shared.record(latest.sections.map { $0.provenance })
         phase = .done
     }
 }

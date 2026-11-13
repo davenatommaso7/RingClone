@@ -67,6 +67,42 @@ jobs:
             exit "$esito"
           } 2>&1 | tee "$RAPPORTO/statici.txt"
 
+      # Criteri CA-08 e CA-09, su tutti i sorgenti di M1 e sui contratti dei dati:
+      # nessun richiamo all'elaborazione giornaliera, alla presentazione, all'archivio o al pannello della BL-0;
+      # nessuna parola dell'elenco vietato nei testi; nessuna chiamata di rete; nessuna scrittura nei log.
+      - name: Controlli statici sui sorgenti di M1
+        id: statici_m1
+        run: |
+          {
+            test -d M1
+            test -d Sources/RingCore/Contracts
+            test -f project-m1.yml
+            esito=0
+            controlla() {
+              local descrizione="$1" opzioni="$2" modello="$3"
+              shift 3
+              if grep "$opzioni" "$modello" "$@"; then
+                echo "TROVATO: $descrizione"
+                esito=1
+              else
+                echo "ASSENTE: $descrizione"
+              fi
+            }
+            controlla "richiami al codice della BL-0 (CA-08)" -rnE \
+              'DailyPipeline|DayAssembler|HealthRepository|DashboardView|NightReport|DailyReport|MotionArchive|Presentation\.|History\.|SleepStaging|SleepMetrics|SleepDetection|Baselines|Store\.shared' \
+              M1 Sources/RingCore/Contracts
+            controlla "parole dell'elenco vietato (CA-08)" -rniE \
+              'punteggi|score|recupero|stress|prontezza|diagnosi|terapia|dovresti|consigliamo|ottimale|eccellente|scarso|normale|anomal|rischio|malattia|patologi|sintom|zona' \
+              M1 Sources/RingCore/Contracts project-m1.yml
+            controlla "chiamate di rete (CA-09)" -rnE \
+              'URLSession|URLRequest|NWConnection|NWPathMonitor|import Network|CFNetwork|WebKit|WKWebView|CloudKit|CKContainer|http://|https://' \
+              M1 Sources/RingCore/Contracts project-m1.yml
+            controlla "scritture nei log (CA-09)" -rnE \
+              'print\(|NSLog|os_log|OSLog|Logger\(|debugPrint|dump\(' \
+              M1 Sources/RingCore/Contracts
+            exit "$esito"
+          } 2>&1 | tee "$RAPPORTO/statici_m1.txt"
+
       - name: Installa XcodeGen alla versione fissata
         id: xcodegen
         run: |
@@ -137,6 +173,7 @@ jobs:
         if: ${{ always() }}
         env:
           ESITO_STATICI: ${{ steps.statici.outcome }}
+          ESITO_STATICI_M1: ${{ steps.statici_m1.outcome }}
           ESITO_XCODEGEN: ${{ steps.xcodegen.outcome }}
           ESITO_GENERA: ${{ steps.genera.outcome }}
           ESITO_IPHONE: ${{ steps.iphone.outcome }}
@@ -169,6 +206,7 @@ jobs:
             echo "| Commit | $GITHUB_SHA |"
             echo "| Esecuzione | $GITHUB_RUN_ID, tentativo $GITHUB_RUN_ATTEMPT |"
             echo "| Controlli statici sul guscio del Watch | ${ESITO_STATICI:-non eseguito} |"
+            echo "| Controlli statici sui sorgenti di M1 | ${ESITO_STATICI_M1:-non eseguito} |"
             echo "| Installazione di XcodeGen | ${ESITO_XCODEGEN:-non eseguito} |"
             echo "| Generazione del progetto di M1 | ${ESITO_GENERA:-non eseguito} |"
             echo "| Compilazione iPhone di M1 | ${ESITO_IPHONE:-non eseguito} |"
@@ -178,7 +216,8 @@ jobs:
             echo "| Avvisi Watch (righe con warning:) | $(conta "$RAPPORTO/build_m1_watch.log" 'warning:') |"
             echo "| Errori Watch (righe con error:) | $(conta "$RAPPORTO/build_m1_watch.log" 'error:') |"
             echo "| App Watch incorporata | ${ESITO_INCORPORATA:-non eseguito} |"
-            allega "Controlli statici" "$RAPPORTO/statici.txt"
+            allega "Controlli statici sul guscio del Watch" "$RAPPORTO/statici.txt"
+            allega "Controlli statici sui sorgenti di M1" "$RAPPORTO/statici_m1.txt"
             allega "Schemi e bersagli" "$RAPPORTO/schemi.txt"
             allega "Righe con error: (iPhone)" "$RAPPORTO/errori_iphone.txt"
             allega "Righe con error: (Watch)" "$RAPPORTO/errori_watch.txt"

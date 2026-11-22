@@ -47,7 +47,7 @@ public struct Baselines: Sendable {
     public var days28: Int
 
     public init(history: [DailyReport], before day: Date, calendar: Calendar) {
-        let past = history.filter { $0.date < day }.sorted { $0.date < $1.date }
+        let past = History.removingExactDuplicates(history.filter { $0.date < day }).sorted { $0.date < $1.date }
         func within(_ days: Int) -> [DailyReport] {
             let from = calendar.date(byAdding: .day, value: -days, to: day) ?? day.addingTimeInterval(Double(-days) * 86_400)
             return past.filter { $0.date >= from }
@@ -79,9 +79,19 @@ public struct Baselines: Sendable {
 }
 
 public enum History {
+    /// Rimuove le copie identiche. Report distinti con la stessa data restano in ordine di ingresso.
+    static func removingExactDuplicates(_ history: [DailyReport]) -> [DailyReport] {
+        let byDate = Dictionary(grouping: history, by: \.date)
+        var seen = Set<Data>()
+        return history.filter { report in
+            guard (byDate[report.date]?.count ?? 0) > 1, let bytes = try? encode([report]) else { return true }
+            return seen.insert(bytes).inserted
+        }
+    }
+
     /// Inserisce o sostituisce il report del giorno, mantiene l'ordine cronologico e al massimo `keepDays` giorni.
     public static func upsert(_ report: DailyReport, into history: [DailyReport], calendar: Calendar, keepDays: Int = 400) -> [DailyReport] {
-        var h = history.filter { !calendar.isDate($0.date, inSameDayAs: report.date) }
+        var h = removingExactDuplicates(history.filter { !calendar.isDate($0.date, inSameDayAs: report.date) })
         h.append(report)
         h.sort { $0.date < $1.date }
         if let last = h.last?.date, let limit = calendar.date(byAdding: .day, value: -keepDays, to: last) {

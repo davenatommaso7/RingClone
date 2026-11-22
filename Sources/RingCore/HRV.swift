@@ -9,6 +9,8 @@ public struct Beat: Sendable {
     /// intervallo battito-battito in ms
     public let ibi: Double
     public let diff: Double?
+    /// Tempo del NN precedente della stessa serie, se la coppia è valida.
+    let predecessorTime: Double?
 }
 
 /// HRV e respiro dagli intervalli battito-battito (IBI).
@@ -47,7 +49,9 @@ public enum HRV {
         let t0 = s.start.timeIntervalSinceReferenceDate
         var out: [Beat] = []; out.reserveCapacity(idx.count)
         for k in 1..<n where ok[k] {
-            out.append(Beat(t: t0 + t[k], ibi: ibi[k], diff: ok[k - 1] ? ibi[k] - ibi[k - 1] : nil))
+            let adjacent = ok[k - 1]
+            out.append(Beat(t: t0 + t[k], ibi: ibi[k], diff: adjacent ? ibi[k] - ibi[k - 1] : nil,
+                            predecessorTime: adjacent ? t0 + t[k - 1] : nil))
         }
         return out
     }
@@ -68,13 +72,17 @@ public enum HRV {
         return a..<max(a, lower(to))
     }
 
+    /// Metriche su una finestra contigua del flusso di battiti ordinato per tempo.
     public static func metrics<C: Collection>(_ b: C, minBeats: Int = 20) -> Metrics? where C.Element == Beat {
+        guard let windowStart = b.first?.t else { return nil }
         var n = 0, sum = 0.0, sq = 0.0, nd = 0, dsq = 0.0, n50 = 0
         for x in b {
             n += 1; sum += x.ibi; sq += x.ibi * x.ibi
-            if let d = x.diff { nd += 1; dsq += d * d; if abs(d) > 50 { n50 += 1 } }
+            if let d = x.diff, let predecessor = x.predecessorTime, predecessor >= windowStart {
+                nd += 1; dsq += d * d; if abs(d) > 50 { n50 += 1 }
+            }
         }
-        guard n >= minBeats, nd >= minBeats * 3 / 4 else { return nil }
+        guard n >= 2, n >= minBeats, nd > 0, nd >= minBeats * 3 / 4 else { return nil }
         let mean = sum / Double(n)
         let sdnn = sqrt(max(sq / Double(n) - mean * mean, 0) * Double(n) / Double(n - 1))
         let rmssd = sqrt(dsq / Double(nd))

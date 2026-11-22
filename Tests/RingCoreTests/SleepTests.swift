@@ -92,6 +92,65 @@ final class SleepTests: XCTestCase {
         XCTAssertEqual(h, 14, accuracy: 0.3)
     }
 
+    func testFragmentBeforePersistentOnsetDoesNotEnterNightTotals() throws {
+        let start = testDay(4)
+        let fragments: [(stage: SleepStage, count: Int)] = [(.wake, 4), (.light, 2), (.wake, 6), (.light, 40),
+                                                           (.wake, 4), (.deep, 40), (.wake, 6)]
+        let stages = fragments.flatMap { Array(repeating: $0.stage, count: $0.count) }
+        let epochs = stages.indices.map { i in
+            Epoch(start: start.addingTimeInterval(Double(i) * 30), hr: (4..<6).contains(i) ? 45 : 60)
+        }
+        let n = try XCTUnwrap(SleepMetrics.night(epochs, stages: stages, beats: [], calendar: testCal))
+
+        XCTAssertEqual(n.tibMin, 51)
+        XCTAssertEqual(n.solMin, 6)
+        XCTAssertEqual(n.tstMin, 40)
+        XCTAssertEqual(n.wasoMin, 2)
+        XCTAssertEqual(n.efficiency, 4000.0 / 51, accuracy: 1e-9)
+        XCTAssertEqual(n.longestBoutMin, 20)
+        XCTAssertEqual(n.lightMin, 20)
+        XCTAssertEqual(n.deepMin, 20)
+        XCTAssertEqual(n.sleepRuns.map(\.minutes), [20, 20])
+        XCTAssertEqual(n.sleepRuns.first?.start, start.addingTimeInterval(360))
+        XCTAssertEqual(try XCTUnwrap(n.avgHR), 60, accuracy: 1e-9)
+        XCTAssertNil(n.rmssd)
+    }
+
+    func testAppleNapCountsSleepOnceAndExcludesWakeAndMissingEpochs() throws {
+        let day = testDay(4), napStart = day.addingTimeInterval(14 * 3600)
+        func nap(_ from: Double, _ to: Double, _ stage: SleepStage) -> SleepSegment {
+            SleepSegment(start: napStart.addingTimeInterval(from * 60), end: napStart.addingTimeInterval(to * 60), stage: stage)
+        }
+        let apple = [SleepSegment(start: day, end: day.addingTimeInterval(7 * 3600), stage: .light),
+                     nap(0, 10, .light), nap(5, 10, .light), nap(10, 16, .wake), nap(20, 30, .deep)]
+        let input = DayInput.make(day: day, calendar: testCal, now: day.addingTimeInterval(86_400),
+                                  hr: [], steps: [], motion: [], appleSleep: apple)
+        let r = DailyPipeline.run(input, profile: testProfile, history: [])
+
+        XCTAssertEqual(r.naps, [DateSpan(start: napStart, end: napStart.addingTimeInterval(30 * 60))])
+        XCTAssertEqual(r.napsMin, 20)
+        XCTAssertEqual(try XCTUnwrap(r.night).tstMin, 420)
+        XCTAssertEqual(try XCTUnwrap(r.dailySleepMin), 440)
+        XCTAssertEqual(r.sleepDebtH, 2.0 / 3, accuracy: 1e-9)
+    }
+
+    func testSensorNapDurationExcludesGapBetweenEstimatedSleepBouts() {
+        let day = testDay(4), start = day.addingTimeInterval(14 * 3600)
+        let epochs = (0..<120).map { i in
+            let quiet = (20..<40).contains(i) || (44..<64).contains(i)
+            let hr: Double? = (40..<44).contains(i) ? nil : 60
+            return Epoch(start: start.addingTimeInterval(Double(i) * 30), hr: hr, motion: 5,
+                         angleChange: quiet ? 0 : 6)
+        }
+        let input = DayInput(day: day, calendar: testCal, now: start.addingTimeInterval(3600), epochs: epochs)
+        let r = DailyPipeline.run(input, profile: testProfile, history: [])
+
+        XCTAssertEqual(r.naps, [DateSpan(start: start.addingTimeInterval(600), end: start.addingTimeInterval(1920))])
+        XCTAssertEqual(r.napsMin, 20)
+        XCTAssertNil(r.dailySleepMin)
+        XCTAssertEqual(r.sleepDebtH, 0)
+    }
+
     func testWatchNotWornIsNotSleep() {
         // orologio in carica tutta la notte: nessuna FC e nessun movimento -> nessuna notte inventata
         var s = Synthetic.day(testDay(4), profile: testProfile).input

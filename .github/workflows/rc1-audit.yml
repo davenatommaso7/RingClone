@@ -1,0 +1,94 @@
+name: RC-AUD-01 · Verifica del candidato
+
+on:
+  push:
+    branches: [audit/rc1-ci-20261122]
+
+permissions:
+  contents: read
+
+env:
+  BASELINE_SHA: 5aebad3e6dbbb80579ffd854fd233ac97471cfb5
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+
+jobs:
+  test:
+    name: XCTest RingCore (${{ matrix.version }})
+    runs-on: xcode-27
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [baseline, candidato]
+    steps:
+      - name: Scarica il candidato e i test indipendenti
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: candidato
+          persist-credentials: false
+      - name: Scarica la baseline fissata per il confronto
+        if: matrix.version == 'baseline'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.BASELINE_SHA }}
+          path: baseline
+          persist-credentials: false
+      - name: Copia i test indipendenti sulla baseline
+        if: matrix.version == 'baseline'
+        shell: bash
+        run: cp candidato/Tests/RingCoreTests/IndependentAuditTests.swift baseline/Tests/RingCoreTests/
+      - name: Esegui tutti i test RingCore
+        working-directory: ${{ matrix.version }}
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          sw_vers
+          swift --version
+          shasum -a 256 Tests/RingCoreTests/IndependentAuditTests.swift
+          swift test
+
+  build:
+    name: Compilazione simulatori (${{ matrix.project }})
+    runs-on: xcode-27
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - project: RingClone
+            spec: project.yml
+          - project: RingCloneM1
+            spec: project-m1.yml
+    steps:
+      - name: Scarica il candidato
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Installa XcodeGen e genera il progetto
+        id: generate
+        shell: bash
+        env:
+          SPEC: ${{ matrix.spec }}
+        run: |
+          xcodebuild -version
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/xcodegen.zip" \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip
+          (cd "$RUNNER_TEMP" && echo '4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  xcodegen.zip' | shasum -a 256 --check && unzip -q xcodegen.zip)
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate --spec "$SPEC"
+      - name: Compila iPhone per simulatore
+        shell: bash
+        env:
+          PROJECT: ${{ matrix.project }}
+        run: |
+          xcodebuild build -project "$PROJECT.xcodeproj" -scheme "$PROJECT" \
+            -configuration Debug -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-iPhone" CODE_SIGNING_ALLOWED=NO
+      - name: Compila Watch per simulatore
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' }}
+        shell: bash
+        env:
+          PROJECT: ${{ matrix.project }}
+        run: |
+          xcodebuild build -project "$PROJECT.xcodeproj" -scheme "${PROJECT}Watch" \
+            -configuration Debug -destination 'generic/platform=watchOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-Watch" CODE_SIGNING_ALLOWED=NO

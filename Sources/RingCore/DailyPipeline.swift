@@ -134,7 +134,7 @@ public enum DailyPipeline {
             night = n
         }
         let naps = periods.naps.map { DateSpan(start: e[$0.lowerBound].start, end: e[$0.upperBound - 1].start.addingTimeInterval(ep)) }
-        let napsMin = naps.map { $0.minutes }.reduce(0, +)
+        let napsMin = Double(periods.napSleepEpochs) * ep / 60
         let dailySleep = night.map { $0.tstMin + napsMin }
         let debt = SleepMetrics.sleepDebtH(b.previousDebtDays.map { $0.sleepMin } + [dailySleep], needH: profile.sleepNeedH)
         var sriDays = lastWeek.map { $0.date }, sriSpans = lastWeek.flatMap { ($0.night?.sleepRuns ?? []) + $0.naps }
@@ -170,7 +170,10 @@ public enum DailyPipeline {
         // ───────── 3. Cuore: FC a riposo, FC massima, zone ─────────
         let dayHR = hrMin.compactMap { $0 }
         let rhr = night?.rhr ?? (b.rhr.n >= 3 ? b.rhr.center : nil) ?? (dayHR.count >= 60 ? Stats.percentile(dayHR, 5) : 60)
-        let hk = input.hkWorkouts.filter { $0.start >= day && $0.start < dayEnd }
+        var hk: [WorkoutRecord] = []
+        for w in input.hkWorkouts where w.start >= day && w.start < dayEnd && !hk.contains(w) {
+            hk.append(w)
+        }
         let mx = HeartRate.hrMax(profile: profile, workoutPeaks: b.workouts.map { $0.maxHR } + hk.map { $0.maxHR })
         let bounds = HeartRate.zoneBounds(model: profile.zoneModel, rhr: rhr, hrMax: mx.value)
         let zoneDay = HeartRate.zoneMinutes(perMinute: hrMin, bounds: bounds)

@@ -22,7 +22,7 @@ public enum SleepMetrics {
                              respRate hkResp: Double? = nil, spo2: Double? = nil) -> NightReport? {
         let n = e.count
         guard n > 0, st.count == n else { return nil }
-        let asleep = st.map { $0.isSleep }
+        var asleep = st.map { $0.isSleep }
         // addormentamento = primo tratto con almeno 18 epoche di sonno su 20 (10 min quasi continui)
         var pre = [Int](repeating: 0, count: n + 1)
         for i in 0..<n { pre[i + 1] = pre[i] + (asleep[i] ? 1 : 0) }
@@ -31,6 +31,8 @@ public enum SleepMetrics {
             return asleep[i] && pre[j] - pre[i] >= min(18, (j - i) * 9 / 10)
         }), let last = asleep.lastIndex(of: true), last > onset else { return nil }
 
+        // Le metriche e i tratti di sonno usano lo stesso confine di addormentamento persistente.
+        for i in 0..<onset { asleep[i] = false }
         let core = Array(st[onset...last])
         let tst = Double(core.filter { $0.isSleep }.count) * ep
         guard tst >= 30 else { return nil }

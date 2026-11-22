@@ -6,6 +6,8 @@ public struct SleepPeriods: Sendable {
     public var naps: [Range<Int>]
     /// "apple" se il periodo principale viene da HealthKit, "sensori" se da movimento + FC
     public var source: String
+    /// Epoche di sonno nei sonnellini, al netto dei buchi tra i tratti della stessa sessione.
+    var napSleepEpochs = 0
 }
 
 /// Individua il periodo di sonno principale e i sonnellini sulla finestra di epoche.
@@ -27,20 +29,26 @@ public enum SleepDetection {
         }
 
         // 1) sessioni Apple: segmenti con stadio, uniti se separati da meno di 30 min
-        var sessions: [(range: Range<Int>, asleep: Int)] = []
-        for s in apple.filter({ $0.stage != nil }).sorted(by: { $0.start < $1.start }) {
+        var staged: [Range<Int>] = [], asleep: [Range<Int>] = []
+        for s in apple.sorted(by: { $0.start < $1.start }) {
+            guard let stage = s.stage else { continue }
             let a = max(0, idx(s.start)), b = min(n, idx(s.end))
             guard a < b else { continue }
-            let sl = s.stage!.isSleep ? b - a : 0
-            if let l = sessions.last, a - l.range.upperBound <= 60 {
-                sessions[sessions.count - 1] = (l.range.lowerBound..<max(l.range.upperBound, b), l.asleep + sl)
-            } else { sessions.append((a..<b, sl)) }
+            staged.append(a..<b)
+            if stage.isSleep { asleep.append(a..<b) }
+        }
+        let appleSleepRuns = Stats.merge(asleep, maxGap: 0)
+        let sessions = Stats.merge(staged, maxGap: 60).map { range in
+            let count = appleSleepRuns.filter { range.contains($0.lowerBound) }.map(\.count).reduce(0, +)
+            return (range: range, asleep: count)
         }
         let appleMain = sessions.filter { $0.asleep >= minMain && mainEnd.contains(date($0.range.upperBound)) }
             .max { $0.asleep < $1.asleep }?.range
-        var naps = sessions.filter { s in
+        let appleNaps = sessions.filter { s in
             napRange.contains(s.asleep) && napWindow.contains(date(s.range.lowerBound)) && (appleMain.map { !overlaps(s.range, $0) } ?? true)
-        }.map { $0.range }
+        }
+        var naps = appleNaps.map { $0.range }
+        var napSleepEpochs = appleNaps.map { $0.asleep }.reduce(0, +)
 
         // 2) sensori: candidati = polso fermo + FC bassa, con orologio indossato
         let worn = e.map { $0.hr != nil }
@@ -51,19 +59,20 @@ public enum SleepDetection {
         let counts = e.map { $0.motion }
         let hasMotion = counts.contains { $0 > 0 }
         var bouts: [Range<Int>] = []
+        var candidates: [Bool] = []
         var thr = 0.0
         if hasMotion {
             let smooth = Stats.rollingMean(counts, half: 10)                          // ±5 min
             let ref = e.indices.filter { !useHR || worn[$0] }.map { counts[$0] }
             thr = max(Stats.percentile(ref.isEmpty ? counts : ref, 40), 1e-6)
-            let cand = e.indices.map { i -> Bool in
+            candidates = e.indices.map { i -> Bool in
                 guard !useHR || (worn[i] && e[i].hr! <= hrCeil) else { return false }
                 // con l'angolo del braccio: nessuna rotazione > 5° (van Hees 2015); altrimenti soglia adattiva sul movimento
                 if hasAngle, let a = e[i].angleChange { return a < 5 && smooth[i] <= 3 * thr }
                 return smooth[i] <= thr
             }
             // un singolo movimento (≤ 1 min) non interrompe il tratto; servono almeno 10 min
-            bouts = Stats.merge(Stats.runs(cand), maxGap: 2).filter { $0.count >= 20 }
+            bouts = Stats.merge(Stats.runs(candidates), maxGap: 2).filter { $0.count >= 20 }
         }
         let merged = Stats.merge(bouts, maxGap: 60)                                    // buchi ≤ 30 min
         let sensorMain = merged.filter { $0.count >= minMain && mainEnd.contains(date($0.upperBound)) }.max { $0.count < $1.count }
@@ -83,8 +92,9 @@ public enum SleepDetection {
             let quiet = e[b].filter { $0.motion <= thr }.count
             guard Double(quiet) >= 0.85 * Double(b.count) else { continue }
             naps.append(b)
+            napSleepEpochs += candidates[b].filter { $0 }.count
         }
         naps.sort { $0.lowerBound < $1.lowerBound }
-        return SleepPeriods(main: main, naps: naps, source: appleMain != nil ? "apple" : "sensori")
+        return SleepPeriods(main: main, naps: naps, source: appleMain != nil ? "apple" : "sensori", napSleepEpochs: napSleepEpochs)
     }
 }

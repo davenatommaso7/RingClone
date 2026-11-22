@@ -83,6 +83,41 @@ final class SignalTests: XCTestCase {
         XCTAssertEqual(HRV.metrics(beats)?.rmssd ?? -1, 0, accuracy: 1e-9)  // nessun salto 1000 -> 700
     }
 
+    func testHRVWindowUsesOnlyPairsInsideTheWindowAndOutsideGaps() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 0)
+        let series = IBISeries(start: start, beatTimes: [0, 1.125, 2, 3, 4, 6, 7, 8.125, 9.125],
+                               precededByGap: [false, false, false, false, false, true, false, false, false])
+        let beats = HRV.beats(from: series)
+        let window = beats[HRV.range(beats, from: 2, to: 10)]
+        let m = try XCTUnwrap(HRV.metrics(window, minBeats: 4))
+
+        // NN: 875, 1000, 1000, 1000, 1125, 1000 ms. Differenze valide: 125, 0, 125, -125 ms.
+        XCTAssertEqual(m.n, 6)
+        XCTAssertEqual(m.meanNN, 1000, accuracy: 1e-9)
+        XCTAssertEqual(m.rmssd, (3.0 * 125 * 125 / 4).squareRoot(), accuracy: 1e-9)
+        XCTAssertEqual(m.sdnn, (2.0 * 125 * 125 / 5).squareRoot(), accuracy: 1e-9)
+        XCTAssertEqual(m.pnn50, 75, accuracy: 1e-9)
+        XCTAssertNil(HRV.metrics(beats[HRV.range(beats, from: 2, to: 8.125)], minBeats: 4))
+    }
+
+    func testHRVWindowExcludesPredecessorsFromBothOverlappingSeries() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 0)
+        let a = IBISeries(start: start, beatTimes: [0, 1, 2, 3, 4])
+        let b = IBISeries(start: start.addingTimeInterval(0.125), beatTimes: [0, 1.125, 2, 3, 4])
+        let beats = HRV.beats(from: [b, a])
+        let m = try XCTUnwrap(HRV.metrics(beats[HRV.range(beats, from: 2, to: 5)], minBeats: 4))
+
+        // Ciascuna serie ha due coppie interne. Solo una differenza supera 50 ms.
+        XCTAssertEqual(m.n, 6)
+        XCTAssertEqual(m.rmssd, 62.5, accuracy: 1e-9)
+        XCTAssertEqual(m.pnn50, 25, accuracy: 1e-9)
+    }
+
+    func testHRVRequiresAValidPairEvenWithLowMinBeats() {
+        XCTAssertNil(HRV.metrics(ibiMs: [], minBeats: 0))
+        XCTAssertNil(HRV.metrics(ibiMs: [1000], minBeats: 1))
+    }
+
     func testZones() {
         let b = HeartRate.zoneBounds(model: .percentMax, rhr: 60, hrMax: 190)
         XCTAssertEqual(b, [95, 114, 133, 152, 171, 190])

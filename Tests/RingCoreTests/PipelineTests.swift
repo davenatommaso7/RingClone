@@ -244,6 +244,11 @@ final class PipelineTests: XCTestCase {
         // un giorno senza alcun dato non fa cadere la pipeline
         let empty = DailyPipeline.run(DayInput.make(day: day, calendar: testCal, now: now, hr: [], steps: [], motion: []), profile: testProfile, history: [])
         XCTAssertTrue(empty.night == nil); XCTAssertEqual(empty.steps, 0); XCTAssertEqual(empty.rhr, 60)
+        XCTAssertNil(empty.dailySleepMin)
+        XCTAssertNil(empty.stressAvg)
+        XCTAssertTrue(empty.stressTimeline.allSatisfy { $0 == nil })
+        XCTAssertNil(empty.sri)
+        XCTAssertEqual(empty.sleepDebtH, 0)
         XCTAssertTrue(empty.calibrating)
     }
 
@@ -255,5 +260,56 @@ final class PipelineTests: XCTestCase {
             h = History.upsert(r, into: h, calendar: testCal, keepDays: 3)
         }
         XCTAssertEqual(h.map { $0.steps }, [3, 5])
+    }
+
+    func testIdenticalHistoricalCopiesCountAsOneDay() throws {
+        let current = testDay(25), previous = testDay(24)
+        var report = try XCTUnwrap(Self.history.first)
+        report.date = previous
+        report.night?.rhr = 55
+        report.night?.rmssd = 40
+        report.dailySleepMin = 360
+        report.workouts = [WorkoutRecord(start: previous, end: previous.addingTimeInterval(600), avgHR: 150,
+                                         maxHR: 150, zoneMinutes: [0, 0, 10, 0, 0], kcal: 100, autoDetected: false)]
+        report.trimp = 30
+        let copies = Array(repeating: report, count: 7)
+        let b = Baselines(history: copies, before: current, calendar: testCal)
+
+        XCTAssertEqual(b.nights, 1)
+        XCTAssertEqual(b.days28, 1)
+        XCTAssertEqual(b.rhr.n, 1)
+        XCTAssertEqual(b.rhr.center, 55)
+        XCTAssertFalse(b.rhr.ready)
+        XCTAssertEqual(b.lnRMSSD.n, 1)
+        XCTAssertEqual(b.lnRMSSD.center, log(40), accuracy: 1e-9)
+        XCTAssertNil(b.hrv7)
+        XCTAssertEqual(b.workouts.count, 1)
+        XCTAssertEqual(b.trimp28, Array(repeating: 0.0, count: 27) + [30])
+        XCTAssertEqual(b.previousDebtDays.count, 1)
+
+        let input = DayInput(day: current, calendar: testCal, now: current, epochs: [])
+        let one = DailyPipeline.run(input, profile: testProfile, history: [report])
+        let repeated = DailyPipeline.run(input, profile: testProfile, history: copies + [one])
+        XCTAssertEqual(try History.encode([one]), try History.encode([repeated]))
+        XCTAssertEqual(repeated.sleepDebtH, 2)
+        XCTAssertEqual(repeated.movementParts["allenamenti"], 0.25)
+        XCTAssertEqual(History.upsert(repeated, into: copies, calendar: testCal).count, 2)
+    }
+
+    func testIdenticalImportedWorkoutDoesNotDoubleLoadOrEnergy() {
+        let day = testDay(25), end = day.addingTimeInterval(600)
+        let epochs = (0..<20).map { Epoch(start: day.addingTimeInterval(Double($0) * 30), hr: 150) }
+        var input = DayInput(day: day, calendar: testCal, now: end, epochs: epochs)
+        let workout = WorkoutRecord(start: day, end: end, avgHR: 150, maxHR: 150,
+                                    zoneMinutes: [], kcal: 100, autoDetected: false)
+        input.hkWorkouts = [workout, workout]
+        var profile = testProfile
+        profile.hrMaxOverride = 200
+        let report = DailyPipeline.run(input, profile: profile, history: [])
+
+        XCTAssertEqual(report.workouts.count, 1)
+        XCTAssertEqual(report.trimp, 30)
+        XCTAssertEqual(report.kcalActive, 100)
+        XCTAssertEqual(report.movementParts["allenamenti"], 0.25)
     }
 }

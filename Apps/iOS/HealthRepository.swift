@@ -71,11 +71,13 @@ final class HealthRepository: @unchecked Sendable {
             let q = HKStatisticsCollectionQuery(quantityType: HKQuantityType(.stepCount), quantitySamplePredicate: pred,
                                                 options: .cumulativeSum, anchorDate: a, intervalComponents: DateComponents(minute: 1))
             q.initialResultsHandler = { _, coll, err in
+                if let err = err as? HKError, err.code == .errorNoData { c.resume(returning: []); return }
                 if let err { c.resume(throwing: err); return }
                 var out: [QuantitySpan] = []
                 coll?.enumerateStatistics(from: a, to: b) { s, _ in
-                    let v = s.sumQuantity()?.doubleValue(for: .count()) ?? 0
-                    if v > 0 { out.append(QuantitySpan(start: s.startDate, end: s.endDate, value: v)) }
+                    if let v = s.sumQuantity()?.doubleValue(for: .count()), v.isFinite, v >= 0 {
+                        out.append(QuantitySpan(start: s.startDate, end: s.endDate, value: v))
+                    }
                 }
                 c.resume(returning: out)
             }
@@ -122,7 +124,7 @@ final class HealthRepository: @unchecked Sendable {
                 box.times.append(time); box.gaps.append(precededByGap)
                 if done {
                     box.finished = true
-                    c.resume(returning: IBISeries(start: s.startDate, beatTimes: box.times, precededByGap: box.gaps))
+                    c.resume(returning: IBISeries(start: s.startDate, beatTimes: box.times, precededByGap: box.gaps, sourceID: s.uuid))
                 }
             }
             store.execute(q)
@@ -164,7 +166,7 @@ final class HealthRepository: @unchecked Sendable {
                                  avgHR: hr?.averageQuantity()?.doubleValue(for: Self.bpm) ?? 0,
                                  maxHR: hr?.maximumQuantity()?.doubleValue(for: Self.bpm) ?? 0,
                                  zoneMinutes: [0, 0, 0, 0, 0], kcal: kcal ?? 0, autoDetected: false,
-                                 activity: Self.activityName(w.workoutActivityType))
+                                 activity: Self.activityName(w.workoutActivityType), sourceID: w.uuid, importedKcal: kcal)
         }
     }
 

@@ -39,7 +39,7 @@ public enum HRV {
     /// Converte una serie in battiti NN conservando l'adiacenza
     public static func beats(from s: IBISeries) -> [Beat] {
         let t = s.beatTimes, n = t.count
-        guard n >= 2 else { return [] }
+        guard n >= 2, s.precededByGap.count == n else { return [] }
         var ibi = [Double](repeating: 0, count: n), present = [Bool](repeating: false, count: n)
         for k in 1..<n where !s.precededByGap[k] && t[k] > t[k - 1] { ibi[k] = (t[k] - t[k - 1]) * 1000; present[k] = true }
         let idx = (1..<n).filter { present[$0] }
@@ -58,7 +58,32 @@ public enum HRV {
 
     /// Tutte le serie in un unico flusso ordinato nel tempo
     public static func beats(from series: [IBISeries]) -> [Beat] {
-        series.sorted { $0.start < $1.start }.flatMap { beats(from: $0) }.sorted { $0.t < $1.t }
+        struct Content: Hashable {
+            let start: Date
+            let times: [UInt64]
+            let gaps: [Bool]
+
+            init(_ s: IBISeries) {
+                start = s.start; times = s.beatTimes.map(\.bitPattern); gaps = s.precededByGap
+            }
+        }
+        var contentByID: [UUID: Content] = [:]
+        var conflicts = Set<UUID>()
+        let indexed = series.map { ($0, Content($0)) }
+        for (s, content) in indexed {
+            if let id = s.sourceID, let prior = contentByID.updateValue(content, forKey: id), prior != content {
+                conflicts.insert(id)
+            }
+        }
+        let identified = Set(contentByID.compactMap { id, content in conflicts.contains(id) ? nil : content })
+        var ids = Set<UUID>(), anonymous = Set<Content>()
+        let unique = indexed.compactMap { s, content -> IBISeries? in
+            if let id = s.sourceID {
+                return !conflicts.contains(id) && ids.insert(id).inserted ? s : nil
+            }
+            return !identified.contains(content) && anonymous.insert(content).inserted ? s : nil
+        }
+        return unique.flatMap { beats(from: $0) }.sorted { $0.t < $1.t }
     }
 
     /// Indici [lo, hi) dei battiti con t in [from, to) (ricerca binaria su flusso ordinato)

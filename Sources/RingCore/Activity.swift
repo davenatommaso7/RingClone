@@ -130,9 +130,14 @@ public enum Energy {
     /// altrimenti: allenamenti (Keytel) + passi fuori allenamento. Il basale è proporzionale alla parte di giorno trascorsa.
     public static func daily(_ p: UserProfile, dayFraction: Double, hkActive: Double?, hkBasal: Double?,
                              workouts: [WorkoutRecord], stepsOutside: Double) -> (total: Double, active: Double) {
-        let basal = hkBasal.flatMap { $0 > 0 ? $0 : nil } ?? bmr(p) * Stats.clamp(dayFraction, 0, 1)
-        if let a = hkActive, a > 0 { return (basal + a, a) }
+        let basal = observedEnergy(hkBasal) ?? bmr(p) * Stats.clamp(dayFraction, 0, 1)
+        if let a = observedEnergy(hkActive) { return (basal + a, a) }
         let act = workouts.map { $0.kcal }.reduce(0, +) + stepsOutside * kcalPerStep(p)
         return (basal + act, act)
+    }
+
+    static func observedEnergy(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value >= 0 else { return nil }
+        return value
     }
 }

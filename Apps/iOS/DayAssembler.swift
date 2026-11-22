@@ -32,17 +32,15 @@ struct DayAssembler: Sendable {
         async let vo2Q = hk.values(.vo2Max, from: day.addingTimeInterval(-90 * 86_400), to: to, unit: HealthRepository.vo2Unit)
 
         let hr = try await hrQ
-        let steps = (try? await stepsQ) ?? []
-        let sleep = (try? await sleepQ) ?? []
-        let motion = archive.epochs(from: from, to: to)
+        let steps = try await stepsQ
+        let sleep = try await sleepQ
+        let motion = try archive.readEpochs(from: from, to: to)
 
         var input = DayInput.make(day: day, calendar: calendar, now: now, hr: hr, steps: steps, motion: motion, appleSleep: sleep)
-        guard !hr.isEmpty || !steps.isEmpty || !motion.isEmpty || !sleep.isEmpty else { throw Failure.noData }
-
         input.ibiSeries = (try? await ibiQ) ?? []
-        input.hkWorkouts = (try? await workoutsQ) ?? []
-        input.hkActiveKcal = try? await activeQ
-        input.hkBasalKcal = try? await basalQ
+        input.hkWorkouts = try await workoutsQ
+        input.hkActiveKcal = try await activeQ
+        input.hkBasalKcal = try await basalQ
         input.daylightMin = try? await daylightQ
 
         // Valori notturni: si considerano solo i campioni dentro il sonno che termina in questo giorno
@@ -63,6 +61,10 @@ struct DayAssembler: Sendable {
         if let v = ((try? await vo2Q) ?? []).last {
             input.appleVO2 = v.value
             input.appleVO2AgeDays = max(to.timeIntervalSince(v.date) / 86_400, 0)
+        }
+        guard !hr.isEmpty || !steps.isEmpty || !motion.isEmpty || !sleep.isEmpty || !input.ibiSeries.isEmpty ||
+                  !input.hkWorkouts.isEmpty || input.hkActiveKcal != nil || input.hkBasalKcal != nil || input.daylightMin != nil else {
+            throw Failure.noData
         }
         return input
     }

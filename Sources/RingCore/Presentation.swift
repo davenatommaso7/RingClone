@@ -112,6 +112,22 @@ public enum Presentation {
         return sign + t + (unit.isEmpty ? "" : " " + unit)
     }
 
+    public static func stateLabel(_ state: DailyMetricState) -> String {
+        switch state {
+        case .observed, .computed: return "Disponibile"
+        case .estimated: return "Stima"
+        case .unavailable: return "Non disponibile"
+        case .insufficient: return "Dati insufficienti"
+        case .calibrating: return "In calibrazione"
+        case .stale: return "Dato non aggiornato"
+        }
+    }
+
+    private static func display(_ state: DailyMetricState, value: @autoclosure () -> String) -> String {
+        guard state.hasValue else { return stateLabel(state) }
+        return state == .estimated ? value() + " (stima)" : value()
+    }
+
     public static func sleepLines(_ r: DailyReport) -> [Line] {
         var out: [Line] = []
         if let n = r.night {
@@ -131,21 +147,21 @@ public enum Presentation {
             ]
         }
         if r.napsMin > 0 { out.append(Line("Sonnellini", "\(r.naps.count) (\(duration(r.napsMin)))")) }
-        out.append(Line("Debito di sonno", duration(r.sleepDebtH * 60)))
+        out.append(Line("Debito di sonno", r.dailySleepMin == nil ? stateLabel(.insufficient) : duration(r.sleepDebtH * 60)))
         out.append(Line("Regolarità (SRI)", r.sri == nil ? "servono più notti" : number(r.sri)))
         out.append(Line("Costanza degli orari", r.sleepConsistency == nil ? "servono più notti" : number(r.sleepConsistency)))
         return out
     }
 
     public static func heartLines(_ r: DailyReport) -> [Line] {
-        var out = [Line("FC a riposo", number(r.rhr, unit: "bpm"))]
+        var out = [Line("FC a riposo", display(r.state(\.rhr), value: number(r.rhr, unit: "bpm")))]
         if let n = r.night {
             out += [
                 Line("FC media nel sonno", number(n.avgHR, unit: "bpm")),
                 Line("HRV (RMSSD)", number(n.rmssd, unit: "ms")),
                 Line("HRV (SDNN)", number(n.sdnn, unit: "ms")),
                 Line("Frequenza respiratoria", number(n.respRate, digits: 1, unit: "atti/min")),
-                Line("Temperatura cutanea", n.skinTempDev == nil ? "in calibrazione" : number(n.skinTempDev, digits: 2, unit: "°C", signed: true)),
+                Line("Temperatura cutanea", n.skinTempDev == nil ? (n.skinTemp == nil ? stateLabel(.unavailable) : "in calibrazione") : number(n.skinTempDev, digits: 2, unit: "°C", signed: true)),
             ]
             if n.spo2 != nil { out.append(Line("SpO₂", number(n.spo2, unit: "%"))) }
         }
@@ -161,14 +177,14 @@ public enum Presentation {
 
     public static func activityLines(_ r: DailyReport) -> [Line] {
         [
-            Line("Passi", number(r.steps)),
-            Line("Ore attive", "\(r.activeHours)"),
-            Line("Minuti attivi", duration(r.activeMinutes)),
-            Line("Tempo inattivo", duration(r.inactiveMin)),
-            Line("Periodo sedentario più lungo", duration(r.longestSedentaryMin)),
-            Line("Calorie totali", number(r.kcalTotal, unit: "kcal")),
-            Line("Calorie attive", number(r.kcalActive, unit: "kcal")),
-            Line("Carico di allenamento (TRIMP)", number(r.trimp)),
+            Line("Passi", display(r.state(\.steps), value: number(r.steps))),
+            Line("Ore attive", display(r.state(\.activity), value: "\(r.activeHours)")),
+            Line("Minuti attivi", display(r.state(\.activity), value: duration(r.activeMinutes))),
+            Line("Tempo inattivo", display(r.state(\.activity), value: duration(r.inactiveMin))),
+            Line("Periodo sedentario più lungo", display(r.state(\.activity), value: duration(r.longestSedentaryMin))),
+            Line("Calorie totali", display(r.state(\.energyTotal), value: number(r.kcalTotal, unit: "kcal"))),
+            Line("Calorie attive", display(r.state(\.energyActive), value: number(r.kcalActive, unit: "kcal"))),
+            Line("Carico di allenamento (TRIMP)", display(r.state(\.trimp), value: number(r.trimp))),
         ]
     }
 
@@ -178,26 +194,32 @@ public enum Presentation {
     }
 
     public static func workoutDetail(_ w: WorkoutRecord) -> String {
-        "FC media \(number(w.avgHR)) · max \(number(w.maxHR)) · \(number(w.kcal, unit: "kcal"))"
+        let energy = Energy.observedEnergy(w.importedKcal) ?? (w.kcal > 0 ? w.kcal : nil)
+        return "FC media \(number(w.avgHR > 0 ? w.avgHR : nil)) · max \(number(w.maxHR > 0 ? w.maxHR : nil)) · \(number(energy, unit: "kcal"))"
             + (w.autoDetected ? " · rilevato automaticamente" : "")
     }
 
     public static func stressLines(_ r: DailyReport) -> [Line] {
-        guard let avg = r.stressAvg else { return [] }
-        return [Line("Media del giorno", "\(number(avg)) (\(stressLabel(avg)))"), Line("Stress Rhythm", number(r.stressRhythm))]
+        guard let avg = r.stressAvg, r.state(\.stress).hasValue else { return [] }
+        return [Line("Media del giorno", "\(number(avg)) (\(stressLabel(avg)), stima)"),
+                Line("Stress Rhythm", display(r.state(\.rhythm), value: number(r.stressRhythm)))]
     }
 
     public static func circadianLines(_ r: DailyReport) -> [Line] {
-        var out = [Line("Allineamento circadiano", number(r.circadianAlignment)),
+        var out = [Line("Allineamento circadiano", display(r.state(\.alignment), value: number(r.circadianAlignment))),
                    Line("Social Jetlag", r.socialJetlagH.map { duration(abs($0) * 60) } ?? "servono più notti")]
         if let c = r.chronotypeMSFsc { out.append(Line("Metà del sonno nei giorni liberi", CircadianWindow.clock(c))) }
-        out.append(Line("Minimo di temperatura", CircadianWindow.clock(r.tempMinH)))
+        let state = r.state(\.tempMinimum)
+        let name = state == .estimated ? "Minimo di temperatura (stima da orari)" : "Minimo di temperatura"
+        out.append(Line(name, state.hasValue && r.tempMinH.isFinite ? CircadianWindow.clock(r.tempMinH) : stateLabel(state)))
         return out
     }
 
     public static func fitnessLines(_ r: DailyReport) -> [Line] {
-        [Line("VO₂ max", number(r.vo2max, digits: 1, unit: "ml/kg/min")), Line("Origine della stima", r.vo2Source),
-         Line("Cardio Age", number(r.cardioAge, unit: "anni"))]
+        let state = r.state(\.fitness)
+        return [Line("VO₂ max", display(state, value: number(r.vo2max, digits: 1, unit: "ml/kg/min"))),
+                Line("Origine della stima", state.hasValue ? r.vo2Source : stateLabel(state)),
+                Line("Cardio Age", display(state.hasValue ? .estimated : state, value: number(r.cardioAge, unit: "anni")))]
     }
 }
 

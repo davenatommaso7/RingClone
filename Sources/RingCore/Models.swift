@@ -57,6 +57,13 @@ public struct Epoch: Sendable {
     public var steps: Double
     /// stadio di una sorgente esterna (Apple Salute): osservazione aggiuntiva per l'HMM
     public var appleStage: SleepStage?
+    // Le epoche da campioni grezzi registrano esplicitamente la copertura.
+    var hrObserved: Bool?
+    var stepsObserved: Bool?
+    var motionObserved: Bool?
+    var observedHR: Double? { hrObserved == false ? nil : hr.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } }
+    var hasSteps: Bool { stepsObserved ?? (steps > 0) }
+    var hasMotion: Bool { motionObserved ?? (angleChange != nil || motion > 0) }
 
     public init(start: Date, hr: Double? = nil, motion: Double = 0, angleChange: Double? = nil, steps: Double = 0,
                 appleStage: SleepStage? = nil) {
@@ -77,9 +84,11 @@ public struct IBISeries: Sendable {
     public let start: Date
     public let beatTimes: [Double]
     public let precededByGap: [Bool]
-    public init(start: Date, beatTimes: [Double], precededByGap: [Bool]? = nil) {
+    public let sourceID: UUID?
+    public init(start: Date, beatTimes: [Double], precededByGap: [Bool]? = nil, sourceID: UUID? = nil) {
         self.start = start; self.beatTimes = beatTimes
         self.precededByGap = precededByGap ?? [Bool](repeating: false, count: beatTimes.count)
+        self.sourceID = sourceID
     }
     /// Costruisce la serie da una lista di intervalli (ms) contigui
     public init(start: Date, ibiMs: [Double]) {
@@ -108,10 +117,15 @@ public struct WorkoutRecord: Codable, Sendable, Equatable {
     public var kcal: Double
     public var autoDetected: Bool
     public var activity: String
+    /// Identità del campione presso la sorgente. Assente nei report legacy e nelle rilevazioni locali.
+    public var sourceID: UUID?
+    /// Energia osservata nel workout. Uno zero esplicito è un valore valido.
+    public var importedKcal: Double?
     public init(start: Date, end: Date, avgHR: Double, maxHR: Double, zoneMinutes: [Double], kcal: Double,
-                autoDetected: Bool, activity: String = "altro") {
+                autoDetected: Bool, activity: String = "altro", sourceID: UUID? = nil, importedKcal: Double? = nil) {
         self.start = start; self.end = end; self.avgHR = avgHR; self.maxHR = maxHR
         self.zoneMinutes = zoneMinutes; self.kcal = kcal; self.autoDetected = autoDetected; self.activity = activity
+        self.sourceID = sourceID; self.importedKcal = importedKcal
     }
     public var minutes: Double { end.timeIntervalSince(start) / 60 }
     public var trimp: Double { HeartRate.trimp(zoneMinutes) }
@@ -190,6 +204,35 @@ public struct CircadianWindow: Codable, Sendable, Equatable {
     public var label: String { "\(Self.clock(startH))–\(Self.clock(endH))" }
 }
 
+public enum DailyMetricState: String, Codable, Sendable, Equatable {
+    case observed, computed, estimated, unavailable, insufficient, calibrating, stale
+
+    public var hasValue: Bool {
+        self == .observed || self == .computed || self == .estimated
+    }
+}
+
+/// Stato dei risultati derivati nel report. L'assenza della struttura identifica un report legacy.
+public struct DailyEvidence: Codable, Sendable {
+    public static let currentVersion = 1
+    public var version = DailyEvidence.currentVersion
+    public var rhr: DailyMetricState
+    public var zones: DailyMetricState
+    public var steps: DailyMetricState
+    public var activity: DailyMetricState
+    public var energyActive: DailyMetricState
+    public var energyTotal: DailyMetricState
+    public var trimp: DailyMetricState
+    public var movement: DailyMetricState
+    public var stress: DailyMetricState
+    public var rhythm: DailyMetricState
+    public var recovery: DailyMetricState
+    public var alignment: DailyMetricState
+    public var tempMinimum: DailyMetricState
+    public var fitness: DailyMetricState
+    public var baselineReady: Bool
+}
+
 public struct DailyReport: Codable, Sendable, Identifiable {
     /// inizio del giorno di calendario locale
     public var date: Date
@@ -240,7 +283,15 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     public var vo2Source: String
     public var cardioAgeRaw: Double
     public var cardioAge: Double
-    /// notti valide nella baseline (sotto 7 = calibrazione: i confronti con la baseline sono neutri)
+    /// notti valide nella baseline
     public var baselineNights: Int
-    public var calibrating: Bool { baselineNights < 7 }
+    public internal(set) var evidence: DailyEvidence? = nil
+    /// Istante di acquisizione del report, usato per scegliere una revisione dello stesso giorno.
+    public internal(set) var computedAt: Date? = nil
+    public var calibrating: Bool { state(\.recovery) == .stale || evidence?.baselineReady != true }
+
+    public func state(_ metric: KeyPath<DailyEvidence, DailyMetricState>) -> DailyMetricState {
+        guard let evidence, evidence.version == DailyEvidence.currentVersion else { return .stale }
+        return evidence[keyPath: metric]
+    }
 }

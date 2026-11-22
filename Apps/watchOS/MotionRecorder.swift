@@ -26,7 +26,7 @@ final class MotionRecorder: @unchecked Sendable {
 
     static var isAvailable: Bool { CMSensorRecorder.isAccelerometerRecordingAvailable() }
 
-    /// istante (multiplo di 30 s) fino a cui i campioni sono già stati elaborati
+    /// Fine dell'ultima epoca accodata su disco, oppure punto iniziale di acquisizione.
     private var cursor: Date? {
         get {
             let t = UserDefaults.standard.double(forKey: cursorKey)
@@ -62,7 +62,7 @@ final class MotionRecorder: @unchecked Sendable {
         // primo avvio: si parte da adesso (prima non c'era nessuna registrazione in corso)
         guard let saved = cursor else { cursor = limit; return }
         var from = max(saved, oldest)
-        let end = min(limit, from.addingTimeInterval(maxSpan))
+        let end = min(limit, from.addingTimeInterval((maxSpan / ep).rounded(.down) * ep))
         guard end > from else { return }
 
         var acc = MotionAccumulator(fs: 50)
@@ -70,16 +70,17 @@ final class MotionRecorder: @unchecked Sendable {
         var lastT = from.timeIntervalSince1970 - 1
         while from < end {
             let to = min(from.addingTimeInterval(Self.slice), end)
-            if let list = recorder.accelerometerData(from: from, to: to) {
-                for case let d as CMRecordedAccelerometerData in list {
-                    let t = d.startDate.timeIntervalSince1970
-                    // scarta doppioni e campioni fuori dal blocco richiesto
-                    guard t > lastT, t >= from.timeIntervalSince1970, t < to.timeIntervalSince1970 else { continue }
-                    lastT = t
-                    let a = d.acceleration
-                    if let e = acc.add(t: t, x: a.x, y: a.y, z: a.z) { out.append(e) }
-                }
+            guard let list = recorder.accelerometerData(from: from, to: to) else { break }
+            let before = lastT
+            for case let d as CMRecordedAccelerometerData in list {
+                let t = d.startDate.timeIntervalSince1970
+                // scarta doppioni e campioni fuori dal blocco richiesto
+                guard t > lastT, t >= from.timeIntervalSince1970, t < to.timeIntervalSince1970 else { continue }
+                lastT = t
+                let a = d.acceleration
+                if let e = acc.add(t: t, x: a.x, y: a.y, z: a.z) { out.append(e) }
             }
+            guard lastT > before else { break }
             from = to
         }
         if let e = acc.flush() { out.append(e) }
@@ -87,10 +88,10 @@ final class MotionRecorder: @unchecked Sendable {
         var i = 0
         while i < out.count {
             let j = min(i + 240, out.count)
-            WatchLink.shared.enqueue(Array(out[i..<j]))
+            guard WatchLink.shared.enqueue(Array(out[i..<j])) else { return }
+            cursor = out[j - 1].start.addingTimeInterval(ep)
             i = j
         }
-        cursor = end
     }
 }
 
@@ -124,8 +125,7 @@ final class WorkoutMotion: @unchecked Sendable {
                         }
                     }
                     if out.count >= 20 {                              // ogni 10 minuti circa
-                        WatchLink.shared.enqueue(out)
-                        out.removeAll()
+                        if WatchLink.shared.enqueue(out) { out.removeAll() }
                     }
                     if Task.isCancelled { break }
                 }

@@ -21,11 +21,13 @@ struct DashboardView: View {
                     if let m = store.message { Notice(text: m, symbol: "info.circle") }
                     if let r = report {
                         DayPicker(reports: store.reports, current: r, calendar: store.calendar, selected: $selected)
-                        if r.calibrating {
-                            Notice(text: "Calibrazione: \(r.baselineNights) notti su 7. Finché la baseline personale non è pronta, i confronti con i tuoi valori abituali sono neutri.", symbol: "hourglass")
+                        if r.evidence == nil {
+                            Notice(text: "Dato non aggiornato. Questo report precede i controlli sulla disponibilità dei dati.", symbol: "clock")
+                        } else if r.calibrating {
+                            Notice(text: "In calibrazione. Per il confronto personale servono almeno sette valori notturni per FC a riposo, HRV e temperatura.", symbol: "hourglass")
                         }
                         ScoresCard(report: r)
-                        if !r.flags.isEmpty { FlagsCard(flags: r.flags) }
+                        if r.evidence != nil && !r.flags.isEmpty { FlagsCard(flags: r.flags) }
                         SleepCard(report: r)
                         HeartCard(report: r)
                         StressCard(report: r)
@@ -109,20 +111,25 @@ private struct Score: View {
     let name: String
     let value: Double
     let tint: Color
+    var state: DailyMetricState = .computed
     var body: some View {
         VStack(spacing: 4) {
-            Gauge(value: min(max(value, 0), 100), in: 0...100) {
-                EmptyView()
-            } currentValueLabel: {
-                Text("\(Int(value.rounded()))")
+            if state.hasValue && value.isFinite {
+                Gauge(value: min(max(value, 0), 100), in: 0...100) {
+                    EmptyView()
+                } currentValueLabel: {
+                    Text(Presentation.number(value))
+                }
+                .gaugeStyle(.accessoryCircular)
+                .tint(tint)
+                .accessibilityLabel("\(name): \(Presentation.number(value)) su 100")
+            } else {
+                Text(Presentation.stateLabel(state)).font(.caption).foregroundStyle(.secondary)
             }
-            .gaugeStyle(.accessoryCircular)
-            .tint(tint)
             Text(name).font(.caption).multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(name): \(Int(value.rounded())) su 100")
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -215,15 +222,19 @@ private struct ScoresCard: View {
     var body: some View {
         Card(title: "Punteggi", symbol: "circle.hexagongrid") {
             HStack(alignment: .top) {
-                if let n = report.night { Score(name: "Sleep Index", value: n.sleepIndex, tint: .indigo) }
-                Score(name: "Recupero", value: report.recovery, tint: .green)
-                Score(name: "Movement Index", value: report.movementIndex, tint: .orange)
-                Score(name: "Allineamento circadiano", value: report.circadianAlignment, tint: .teal)
+                if let n = report.night {
+                    Score(name: "Sleep Index", value: n.sleepIndex, tint: .indigo, state: report.evidence == nil ? .stale : .computed)
+                }
+                Score(name: "Recupero", value: report.recovery, tint: .green, state: report.state(\.recovery))
+                Score(name: "Movement Index", value: report.movementIndex, tint: .orange, state: report.state(\.movement))
+                Score(name: "Allineamento circadiano", value: report.circadianAlignment, tint: .teal, state: report.state(\.alignment))
             }
-            Row(name: "Recupero", value: report.recoveryLabel)
-            if let n = report.night { Row(name: "Sonno", value: SleepMetrics.label(n.sleepIndex)) }
-            Parts(title: "Contributi al recupero (scarti dalla tua norma)", parts: report.recoveryParts) {
-                Presentation.number($0, digits: 1, signed: true)
+            if report.state(\.recovery).hasValue { Row(name: "Recupero", value: report.recoveryLabel) }
+            if let n = report.night, report.evidence != nil { Row(name: "Sonno", value: SleepMetrics.label(n.sleepIndex)) }
+            if report.state(\.recovery).hasValue {
+                Parts(title: "Contributi al recupero (scarti dalla tua norma)", parts: report.recoveryParts) {
+                    Presentation.number($0, digits: 1, signed: true)
+                }
             }
         }
     }
@@ -298,16 +309,20 @@ private struct HeartCard: View {
     var body: some View {
         Card(title: "Cuore", symbol: "heart") {
             Lines(lines: Presentation.heartLines(report))
-            Chart(zones) { z in
-                BarMark(x: .value("Minuti", z.minutes), y: .value("Zona", z.name))
-                    .annotation(position: .trailing) {
-                        Text(Presentation.number(z.minutes, unit: "min")).font(.caption2)
-                    }
-            }
-            .chartXAxisLabel("minuti di oggi in ogni zona")
-            .frame(height: 170)
-            ForEach(zones) { z in
-                Row(name: z.name, value: Presentation.zoneRange(report, z.id))
+            if report.state(\.zones).hasValue {
+                Chart(zones) { z in
+                    BarMark(x: .value("Minuti", z.minutes), y: .value("Zona", z.name))
+                        .annotation(position: .trailing) {
+                            Text(Presentation.number(z.minutes, unit: "min")).font(.caption2)
+                        }
+                }
+                .chartXAxisLabel("minuti di oggi in ogni zona")
+                .frame(height: 170)
+                ForEach(zones) { z in
+                    Row(name: z.name, value: Presentation.zoneRange(report, z.id))
+                }
+            } else {
+                Row(name: "Minuti nelle zone", value: Presentation.stateLabel(report.state(\.zones)))
             }
         }
     }
@@ -319,7 +334,7 @@ private struct StressCard: View {
     let report: DailyReport
     var body: some View {
         Card(title: "Stress fisiologico", symbol: "waveform.path.ecg") {
-            if report.stressAvg != nil {
+            if report.state(\.stress).hasValue {
                 Lines(lines: Presentation.stressLines(report))
                 Chart(Presentation.stressPoints(report.stressTimeline)) { p in
                     BarMark(x: .value("Ora", p.hour), y: .value("Stress", p.value), width: .fixed(2))
@@ -332,7 +347,7 @@ private struct StressCard: View {
                 Text("Valutato solo da svegli e da fermi: durante il movimento la frequenza cardiaca sale per lo sforzo, non per lo stress.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("Dati insufficienti per oggi.").font(.subheadline).foregroundStyle(.secondary)
+                Text(Presentation.stateLabel(report.state(\.stress))).font(.subheadline).foregroundStyle(.secondary)
             }
         }
     }
@@ -353,7 +368,9 @@ private struct ActivityCard: View {
                     Text(Presentation.workoutDetail(w)).font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Parts(title: "Contributi al Movement Index", parts: report.movementParts) { Presentation.number($0 * 100, unit: "%") }
+            if report.state(\.movement).hasValue {
+                Parts(title: "Contributi al Movement Index", parts: report.movementParts) { Presentation.number($0 * 100, unit: "%") }
+            }
         }
     }
 }
@@ -365,7 +382,7 @@ private struct CircadianCard: View {
     var body: some View {
         Card(title: "Ritmo circadiano", symbol: "sun.max") {
             Lines(lines: Presentation.circadianLines(report))
-            ForEach(Array(report.windows.enumerated()), id: \.offset) { _, w in
+            ForEach(Array((report.state(\.tempMinimum).hasValue ? report.windows : []).enumerated()), id: \.offset) { _, w in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack {
                         Text(w.name).font(.subheadline.weight(.semibold))
@@ -404,8 +421,11 @@ private struct TrendCard: View {
 
     private var points: [TrendPoint] {
         reports.suffix(14).flatMap { r -> [TrendPoint] in
-            var p = [TrendPoint(id: "r\(r.date.timeIntervalSince1970)", date: r.date, series: "Recupero", value: r.recovery)]
-            if let n = r.night {
+            var p: [TrendPoint] = []
+            if r.state(\.recovery).hasValue && r.recovery.isFinite {
+                p.append(TrendPoint(id: "r\(r.date.timeIntervalSince1970)", date: r.date, series: "Recupero", value: r.recovery))
+            }
+            if let n = r.night, r.evidence != nil {
                 p.append(TrendPoint(id: "s\(r.date.timeIntervalSince1970)", date: r.date, series: "Sleep Index", value: n.sleepIndex))
             }
             return p

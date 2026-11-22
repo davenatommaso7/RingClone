@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import WatchConnectivity
 import RingCore
 
@@ -9,7 +10,7 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
     static let shared = WatchLink()
 
     private let lock = NSLock()
-    private let pending: URL
+    private let pending: MotionOutbox
     private var inFlight = Set<String>()
     /// chiamata sulla coda principale quando arrivano nuove impostazioni dall'iPhone
     var onSettings: ((WatchSettings) -> Void)?
@@ -18,8 +19,7 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
 
     private override init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        pending = base.appendingPathComponent("pending", isDirectory: true)
-        try? FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+        pending = MotionOutbox(directory: base.appendingPathComponent("pending", isDirectory: true))
         super.init()
     }
 
@@ -38,21 +38,31 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
     }
 
     /// Mette in coda un pacchetto di epoche e prova a spedirlo
-    func enqueue(_ epochs: [MotionEpoch]) {
-        guard let first = epochs.first, let last = epochs.last, let data = try? MotionChunk(epochs: epochs).encoded() else { return }
-        let url = pending.appendingPathComponent("motion-\(first.index)-\(last.index).json")
-        try? data.write(to: url, options: .atomic)
-        flush()
+    @discardableResult func enqueue(_ epochs: [MotionEpoch]) -> Bool {
+        guard !epochs.isEmpty else { return false }
+        let file: URL
+        do { file = try pending.enqueue(epochs) } catch { return false }
+        transfer([file])
+        return true
     }
 
     /// Spedisce i pacchetti ancora in attesa (transferFile continua anche ad app sospesa)
     func flush() {
-        guard WCSession.isSupported(), WCSession.default.activationState == .activated else { return }
-        let files = (try? FileManager.default.contentsOfDirectory(at: pending, includingPropertiesForKeys: nil)) ?? []
+        transfer((try? pending.packets()) ?? [])
+    }
+
+    private func transfer(_ files: [URL]) {
+        guard WCSession.isSupported(), !files.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
-        for f in files where f.pathExtension == "json" && !inFlight.contains(f.lastPathComponent) {
-            inFlight.insert(f.lastPathComponent)
-            WCSession.default.transferFile(f, metadata: ["kind": "motion"])
+        let session = WCSession.default
+        guard session.activationState == .activated else { return }
+        let queued = Set(session.outstandingFileTransfers.map { $0.file.fileURL.lastPathComponent })
+        for f in files {
+            let name = f.lastPathComponent
+            guard !queued.contains(name), !inFlight.contains(name), let data = try? Data(contentsOf: f) else { continue }
+            inFlight.insert(name)
+            let digest = Data(SHA256.hash(data: data))
+            session.transferFile(f, metadata: ["kind": "motion", "motionPacket": name, "motionSHA256": digest])
         }
     }
 
@@ -74,10 +84,15 @@ final class WatchLink: NSObject, WCSessionDelegate, @unchecked Sendable {
         apply(applicationContext)
     }
 
+    func session(_ session: WCSession, didReceiveUserInfo userInfo: [String: Any]) {
+        guard let name = userInfo["motionArchiveAck"] as? String, let digest = userInfo["motionSHA256"] as? Data else { return }
+        lock.lock(); defer { lock.unlock() }
+        try? pending.acknowledge(name) { Data(SHA256.hash(data: $0)) == digest }
+    }
+
     func session(_ session: WCSession, didFinish fileTransfer: WCSessionFileTransfer, error: Error?) {
         let url = fileTransfer.file.fileURL
         lock.lock(); inFlight.remove(url.lastPathComponent); lock.unlock()
-        // consegnato: si può cancellare. In caso di errore il file resta e verrà rispedito al prossimo flush
-        if error == nil { try? FileManager.default.removeItem(at: url) }
+        // La consegna del file libera il tentativo. Il file resta in coda fino all'ACK dell'archivio.
     }
 }

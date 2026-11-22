@@ -15,7 +15,7 @@ public enum Recovery {
     public static func score(sleepIndex: Double?, night: NightReport?, stressRhythm: Double?, acwr: Double?,
                              sleepDebtH: Double, baselines b: Baselines) -> Result {
         var z: [String: Double] = [:], w: [String: Double] = [:]
-        if let s = sleepIndex { z["sonno"] = (s - 80) / 12; w["sonno"] = 0.30 }
+        if let s = sleepIndex, s.isFinite { z["sonno"] = (s - 80) / 12; w["sonno"] = 0.30 }
         if let r = night?.rhr, b.rhr.ready { z["fc_riposo"] = -b.rhr.z(r); w["fc_riposo"] = 0.25 }
         if let r = night?.rmssd, r > 0, b.lnRMSSD.ready {
             let last = b.lnRMSSD.z(log(r))
@@ -25,16 +25,17 @@ public enum Recovery {
         // la temperatura può solo togliere: dentro ±0,3 °C è neutra, oltre penalizza
         if let d = night?.skinTempDev { z["temperatura"] = -3 * Stats.scale(abs(d), 0.3, 1.0); w["temperatura"] = 0.15 }
         z = z.mapValues { Stats.clamp($0, -3, 3) }
-        let tot = w.values.reduce(0, +)
+        let keys = w.keys.sorted()
+        let tot = keys.compactMap { w[$0] }.reduce(0, +)
         var zz = 0.0
-        if tot > 0 { for (k, v) in z { zz += v * (w[k] ?? 0) / tot } }
-        var score = 100 * Stats.logistic(1.1 + 0.9 * zz)
+        if tot > 0 { for k in keys { zz += (z[k] ?? 0) * (w[k] ?? 0) / tot } }
+        var score = tot > 0 ? 100 * Stats.logistic(1.1 + 0.9 * zz) : .nan
         var parts = z
-        if let s = stressRhythm {
+        if tot > 0, let s = stressRhythm, s.isFinite {
             let delta = 10 * Stats.clamp((s - 80) / 20, -1, 1)          // 100 -> +10, 80 -> 0, 60 o meno -> -10
             score += delta; parts["stress_punti"] = delta
         }
-        score = Stats.clamp(score, 0, 100)
+        if score.isFinite { score = Stats.clamp(score, 0, 100) }
 
         var flags: [String] = []
         if let d = night?.skinTempDev, d > 0.5,
@@ -46,7 +47,7 @@ public enum Recovery {
         }
         if let a = acwr, a > 1.5 { flags.append("Carico degli ultimi 7 giorni oltre 1,5 volte quello abituale: rischio di sovraccarico") }
         if sleepDebtH > 5 { flags.append("Debito di sonno oltre 5 ore") }
-        return Result(score: score, label: label(score), parts: parts, flags: flags)
+        return Result(score: score, label: score.isFinite ? label(score) : "Dati insufficienti", parts: parts, flags: flags)
     }
 
     public static func label(_ s: Double) -> String {

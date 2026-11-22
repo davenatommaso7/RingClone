@@ -43,6 +43,7 @@ final class WatchDelegate: NSObject, WKApplicationDelegate {
             MotionRecorder.shared.arm()
             scheduleRefresh()
             MotionRecorder.shared.process(maxSpan: 4 * 3600) {
+                WatchLink.shared.flush()
                 DispatchQueue.main.async { refresh.setTaskCompletedWithSnapshot(false) }
             }
         }

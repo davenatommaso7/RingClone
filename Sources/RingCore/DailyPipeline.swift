@@ -63,22 +63,28 @@ public struct DayInput: Sendable {
         }
         let means = (0..<n).filter { cnt[$0] > 0 }.map { TimedValue(date: e[$0].start.addingTimeInterval(ep / 2), value: sum[$0] / Double(cnt[$0])) }
         let interp = Stats.interpolate(means, at: e.map { $0.start.addingTimeInterval(ep / 2) }, maxGap: 900)
-        for i in 0..<n { e[i].hr = interp[i] }
+        for i in 0..<n {
+            e[i].hr = interp[i]
+            e[i].hrObserved = cnt[i] > 0
+            e[i].stepsObserved = false
+            e[i].motionObserved = false
+        }
 
-        for m in motion {
+        let stepSpans = steps.filter { $0.value.isFinite && $0.value >= 0 && $0.start < $0.end }
+        for m in motion where m.samples > 0 {
             let i = m.index - i0
             guard i >= 0 && i < n else { continue }
-            e[i].motion = Double(m.counts); e[i].angleChange = Double(m.angleChange)
-            if steps.isEmpty { e[i].steps = Double(m.steps) }
+            e[i].motion = Double(m.counts); e[i].angleChange = Double(m.angleChange); e[i].motionObserved = true
+            if stepSpans.isEmpty { e[i].steps = Double(m.steps); e[i].stepsObserved = true }
         }
         let t0 = Double(i0) * ep
-        for s in steps where s.value > 0 {
+        for s in stepSpans {
             let a = s.start.timeIntervalSince1970 - t0, b = max(s.end.timeIntervalSince1970 - t0, a + 1)
             let ia = max(Int((a / ep).rounded(.down)), 0), ib = min(Int((b / ep).rounded(.down)), n - 1)
             guard ia <= ib else { continue }
             for i in ia...ib {
                 let ov = min(b, Double(i + 1) * ep) - max(a, Double(i) * ep)
-                if ov > 0 { e[i].steps += s.value * ov / (b - a) }
+                if ov > 0 { e[i].steps += s.value * ov / (b - a); e[i].stepsObserved = true }
             }
         }
         for s in appleSleep {
@@ -120,6 +126,11 @@ public enum DailyPipeline {
                 let st = SleepStaging.stage(seg, lnRMSSD: SleepMetrics.lnRMSSDPerEpoch(seg, beats: beats), model: staging)
                 night = SleepMetrics.night(seg, stages: st, beats: beats, calendar: cal, tempSeries: input.skinTempSeries,
                                            tempNight: input.skinTempNight, respRate: input.hkRespRate, spo2: input.spo2)
+                if let onset = night?.sleepOnset {
+                    let asleep = seg.indices.map { seg[$0].start >= onset && st[$0].isSleep }
+                    let vitals = HeartRate.restingNight(seg.map(\.observedHR), asleep: asleep)
+                    night?.rhr = vitals?.rhr; night?.avgHR = vitals?.avg; night?.hrNadirFrac = vitals?.nadirFrac
+                }
             }
         }
         let week = cal.date(byAdding: .day, value: -7, to: day) ?? day.addingTimeInterval(-7 * 86_400)
@@ -145,17 +156,21 @@ public enum DailyPipeline {
         let t0 = e.first?.start ?? day
         let minutes = max(Int(dayEnd.timeIntervalSince(day) / 60), 0)
         var hrMin = [Double?](repeating: nil, count: minutes)
+        var observedHRMin = hrMin
         var stepsMin = [Double](repeating: 0, count: minutes), motMin = stepsMin
-        var hasData = [Bool](repeating: false, count: minutes)
+        var stepCoverage = [Bool](repeating: false, count: minutes), motionCoverage = stepCoverage
         let off = Int((day.timeIntervalSince(t0) / ep).rounded())
         for m in 0..<minutes {
             let i = off + 2 * m
             guard i >= 0, i + 1 < e.count else { continue }
             let h = [e[i].hr, e[i + 1].hr].compactMap { $0 }
             hrMin[m] = h.isEmpty ? nil : Stats.mean(h)
+            let observed = [e[i].observedHR, e[i + 1].observedHR].compactMap { $0 }
+            observedHRMin[m] = observed.isEmpty ? nil : Stats.mean(observed)
             stepsMin[m] = e[i].steps + e[i + 1].steps
             motMin[m] = (e[i].motion + e[i + 1].motion) / 2
-            hasData[m] = true
+            stepCoverage[m] = e[i].hasSteps || e[i + 1].hasSteps
+            motionCoverage[m] = e[i].hasMotion || e[i + 1].hasMotion
         }
         func minuteRange(_ s: DateSpan) -> Range<Int> {
             let a = Int((s.start.timeIntervalSince(day) / 60).rounded(.down)), z = Int((s.end.timeIntervalSince(day) / 60).rounded(.up))
@@ -165,42 +180,47 @@ public enum DailyPipeline {
         var inBed = [Bool](repeating: false, count: minutes)
         if let n = night { for m in minuteRange(DateSpan(start: n.inBed, end: n.outOfBed)) { inBed[m] = true } }
         for s in naps { for m in minuteRange(s) { inBed[m] = true } }
-        let awake = (0..<minutes).map { hasData[$0] && !inBed[$0] && (hrMin[$0] != nil || stepsMin[$0] > 0) }
+        let awake = (0..<minutes).map { !inBed[$0] && (observedHRMin[$0] != nil || stepCoverage[$0] || motionCoverage[$0]) }
 
         // ───────── 3. Cuore: FC a riposo, FC massima, zone ─────────
-        let dayHR = hrMin.compactMap { $0 }
-        let rhr = night?.rhr ?? (b.rhr.n >= 3 ? b.rhr.center : nil) ?? (dayHR.count >= 60 ? Stats.percentile(dayHR, 5) : 60)
-        var hk: [WorkoutRecord] = []
-        for w in input.hkWorkouts where w.start >= day && w.start < dayEnd && !hk.contains(w) {
-            hk.append(w)
+        let dayHR = observedHRMin.compactMap { $0 }
+        let restingPulse = night?.rhr ?? (b.rhr.n >= 3 ? b.rhr.center : nil) ?? (dayHR.count >= 60 ? Stats.percentile(dayHR, 5) : nil)
+        let hk = History.uniqueWorkouts(input.hkWorkouts.filter { $0.start >= day && $0.start < dayEnd && $0.end > $0.start })
+        let currentIDs = Set(hk.compactMap(\.sourceID))
+        let replayAcrossDays = b.workouts.contains { $0.sourceID.map { currentIDs.contains($0) } == true }
+        let pastWorkouts = b.workouts.filter { workout in
+            guard let id = workout.sourceID else { return true }
+            return !currentIDs.contains(id)
         }
-        let mx = HeartRate.hrMax(profile: profile, workoutPeaks: b.workouts.map { $0.maxHR } + hk.map { $0.maxHR })
-        let bounds = HeartRate.zoneBounds(model: profile.zoneModel, rhr: rhr, hrMax: mx.value)
-        let zoneDay = HeartRate.zoneMinutes(perMinute: hrMin, bounds: bounds)
+        let mx = HeartRate.hrMax(profile: profile, workoutPeaks: pastWorkouts.map(\.maxHR) + hk.map(\.maxHR))
+        let bounds = profile.zoneModel == .karvonen && restingPulse == nil ? [] :
+            HeartRate.zoneBounds(model: profile.zoneModel, rhr: restingPulse ?? 0, hrMax: mx.value)
+        let zoneDay = HeartRate.zoneMinutes(perMinute: observedHRMin, bounds: bounds)
 
         // ───────── 4. Allenamenti ─────────
-        let samples = input.hrSamples.sorted { $0.date < $1.date }
+        let samples = input.hrSamples.filter { $0.value > 25 && $0.value < 240 }.sorted { $0.date < $1.date }
         var workouts: [WorkoutRecord] = hk.map { w in
             var w = w
             let r = minuteRange(DateSpan(start: w.start, end: w.end))
             let s = samples.filter { $0.date >= w.start && $0.date <= w.end }
-            let perMin = r.compactMap { hrMin[$0] }
+            let perMin = r.compactMap { observedHRMin[$0] }
             if s.count >= max(5, Int(w.minutes)) {
                 w.zoneMinutes = HeartRate.zoneMinutes(samples: s, bounds: bounds)
                 if w.avgHR <= 0 { w.avgHR = Stats.mean(s.map { $0.value }) }
                 if w.maxHR <= 0 { w.maxHR = s.map { $0.value }.max() ?? 0 }
             } else {
-                w.zoneMinutes = HeartRate.zoneMinutes(perMinute: r.map { hrMin[$0] }, bounds: bounds)
+                w.zoneMinutes = HeartRate.zoneMinutes(perMinute: r.map { observedHRMin[$0] }, bounds: bounds)
                 if w.avgHR <= 0, !perMin.isEmpty { w.avgHR = Stats.mean(perMin) }
                 if w.maxHR <= 0 { w.maxHR = perMin.max() ?? 0 }
             }
-            if w.kcal <= 0 {
+            if let imported = Energy.observedEnergy(w.importedKcal) { w.kcal = imported }
+            else if w.kcal <= 0 || !w.kcal.isFinite {
                 let bmr = Energy.bmr(profile) / 1440
                 w.kcal = perMin.map { max(Energy.keytelPerMin(hr: $0, profile: profile) - bmr, 0) }.reduce(0, +)
             }
             return w
         }
-        let thr = max(0.6 * mx.value, rhr + 0.4 * (mx.value - rhr))
+        let thr = restingPulse.map { max(0.6 * mx.value, $0 + 0.4 * (mx.value - $0)) } ?? 0.6 * mx.value
         let masked = (0..<minutes).map { awake[$0] ? hrMin[$0] : nil }
         for a in Activity.detectWorkouts(dayStart: day, hrPerMin: masked, stepsPerMin: stepsMin, motionPerMin: motMin,
                                          thrHR: thr, bounds: bounds, profile: profile)
@@ -211,6 +231,10 @@ public enum DailyPipeline {
         var inWorkout = [Bool](repeating: false, count: minutes)
         for w in workouts { for m in minuteRange(DateSpan(start: w.start, end: w.end)) { inWorkout[m] = true } }
         let trimp = workouts.map { $0.trimp }.reduce(0, +)
+        let completeDay = minutes > 0 && dayHR.count == minutes && input.now >= dayEnd
+        let loadKnown = !bounds.isEmpty && (workouts.isEmpty ? completeDay : workouts.allSatisfy {
+            minuteRange(DateSpan(start: $0.start, end: $0.end)).contains { observedHRMin[$0] != nil }
+        })
 
         // ───────── 5. Attività ed energia ─────────
         let steps = stepsMin.reduce(0, +)
@@ -220,18 +244,27 @@ public enum DailyPipeline {
         let elapsed = min(max(input.now.timeIntervalSince(day), 0), dayEnd.timeIntervalSince(day))
         let kcal = Energy.daily(profile, dayFraction: elapsed / max(dayEnd.timeIntervalSince(day), 1), hkActive: input.hkActiveKcal,
                                 hkBasal: input.hkBasalKcal, workouts: workouts, stepsOutside: stepsOutside)
-        let w7 = b.workouts.filter { $0.start >= week.addingTimeInterval(86_400) }.count + workouts.count
+        let w7 = pastWorkouts.filter { $0.start >= week.addingTimeInterval(86_400) }.count + workouts.count
         let mov = Activity.movementIndex(steps: steps, stepGoal: profile.stepGoal, activeHours: act.activeHours, workouts7d: w7)
+        let stepsKnown = stepCoverage.contains(true)
+        let activityKnown = stepsKnown || motionCoverage.contains(true)
+        let activeEnergy: DailyMetricState = Energy.observedEnergy(input.hkActiveKcal) != nil ? .observed :
+            (stepsKnown || workouts.contains { Energy.observedEnergy($0.importedKcal) != nil || $0.kcal > 0 } ? .estimated : .insufficient)
+        let totalEnergy: DailyMetricState = activeEnergy == .observed && Energy.observedEnergy(input.hkBasalKcal) != nil ? .observed :
+            (activeEnergy.hasValue ? .estimated : .insufficient)
 
         // ───────── 6. Stress e recupero ─────────
         let wakeRef = night?.wakeH ?? b.wakeCenter ?? 7
         let bedRef = b.onsetCenter ?? night?.onsetH ?? 23
-        let timeline = Stress.timeline(hrPerMin: hrMin, stepsPerMin: stepsMin, awake: awake, inWorkout: inWorkout, dayStart: day,
-                                       beats: beats, rhr: rhr, baselines: b, nightLnRMSSD: night?.rmssd.map { log($0) })
+        let timeline = restingPulse.map { pulse in
+            Stress.timeline(hrPerMin: observedHRMin, stepsPerMin: stepsMin, awake: awake, inWorkout: inWorkout, dayStart: day,
+                            beats: beats, rhr: pulse, baselines: b, nightLnRMSSD: night?.rmssd.map { log($0) })
+        } ?? Array(repeating: nil, count: 288)
         let valid = timeline.compactMap { $0 }
-        let rhythm = Stress.rhythm(timeline, wakeH: wakeRef, bedH: bedRef)
-        let acwr = b.days28 >= 21 ? Recovery.acwr(b.trimp28 + [trimp]) : nil
-        let rec = Recovery.score(sleepIndex: night?.sleepIndex, night: night, stressRhythm: valid.count >= 12 ? rhythm : nil,
+        let rhythm = valid.count >= 12 ? Stress.rhythm(timeline, wakeH: wakeRef, bedH: bedRef) : nil
+        let observedLoad = Array(b.observedTrimp28.suffix(27)) + [loadKnown ? trimp : nil]
+        let acwr = !replayAcrossDays && observedLoad.allSatisfy { $0 != nil } ? Recovery.acwr(observedLoad.compactMap { $0 }) : nil
+        let rec = Recovery.score(sleepIndex: night?.sleepIndex, night: night, stressRhythm: rhythm,
                                  acwr: acwr, sleepDebtH: debt, baselines: b)
 
         // ───────── 7. Ritmo circadiano ─────────
@@ -239,30 +272,65 @@ public enum DailyPipeline {
         if let n = night { nights28.append((date: day, night: n)) }
         let jet = Circadian.socialJetlag(nights28, workdays: profile.workdays, calendar: cal)
         let tMins = (lastWeek.compactMap { $0.night?.tempMinH } + [night?.tempMinH].compactMap { $0 })
-        let tMin = tMins.isEmpty ? Stats.wrap24(wakeRef - 2) : Stats.circularMeanHours(tMins)
-        let alignment = Circadian.alignment(lastMidH: night?.midpointH, referenceMidH: jet?.msfSc ?? b.midpointCenter, sri: sri,
-                                            daylightMin: input.daylightMin, sjlH: jet?.sjlSc)
-        let windows = Circadian.windows(tMinH: tMin, wakeH: wakeRef, bedH: bedRef)
+        let tMin = tMins.isEmpty ? (night?.wakeH ?? b.wakeCenter).map { Stats.wrap24($0 - 2) } : Stats.circularMeanHours(tMins)
+        let daylight = input.daylightMin.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        let midpointReference = jet?.msfSc ?? b.midpointCenter
+        let alignmentKnown = (night != nil && midpointReference != nil) || sri != nil || daylight != nil || jet != nil
+        let alignment = alignmentKnown ? Circadian.alignment(lastMidH: night?.midpointH, referenceMidH: midpointReference, sri: sri,
+                                                             daylightMin: daylight, sjlH: jet?.sjlSc) : .nan
+        let windows = tMin.map { Circadian.windows(tMinH: $0, wakeH: wakeRef, bedH: bedRef) } ?? []
 
         // ───────── 8. Fitness ─────────
         let from28 = cal.date(byAdding: .day, value: -27, to: day) ?? day.addingTimeInterval(-27 * 86_400)
-        let pa = Fitness.paIndex(workouts: b.workouts.filter { $0.start >= from28 } + workouts, hrMax: mx.value)
-        let vo2 = Fitness.vo2max(profile: profile, rhr: rhr, hrMax: mx.value, hrMaxMeasured: mx.measured, paIndex: pa,
-                                 appleVO2: input.appleVO2, appleAgeDays: input.appleVO2AgeDays)
-        let ageRaw = Fitness.cardioAge(vo2: vo2.value, sex: profile.sex)
+        let p28 = (pastWorkouts.filter { $0.start >= from28 } + workouts).filter { $0.avgHR > 0 && $0.avgHR.isFinite }
+        let pa = Fitness.paIndex(workouts: p28, hrMax: mx.value)
+        let fit = fitness(profile: profile, input: input, rhr: restingPulse, hrMax: mx.value, pa: pa,
+                          canEstimatePA: activityKnown || !p28.isEmpty)
+        let ageRaw = fit.map { Fitness.cardioAge(vo2: $0.value, sex: profile.sex) }
+        let baselineReady = b.rhr.ready && b.lnRMSSD.ready && b.temp.ready
+        let recoveryState: DailyMetricState = rec.score.isFinite ? (baselineReady ? .computed : .calibrating) : .insufficient
+        let evidence = DailyEvidence(
+            rhr: night?.rhr != nil ? .computed : (restingPulse != nil ? .estimated : (dayHR.isEmpty ? .unavailable : .insufficient)),
+            zones: !bounds.isEmpty && !dayHR.isEmpty ? .computed : .insufficient,
+            steps: stepsKnown ? .observed : .unavailable, activity: activityKnown ? .computed : .insufficient,
+            energyActive: activeEnergy, energyTotal: totalEnergy, trimp: loadKnown ? .computed : .insufficient,
+            movement: activityKnown || !workouts.isEmpty ? .estimated : .insufficient,
+            stress: valid.isEmpty ? .insufficient : .estimated, rhythm: rhythm != nil ? .estimated : .insufficient,
+            recovery: recoveryState, alignment: alignmentKnown ? .estimated : .insufficient,
+            tempMinimum: !tMins.isEmpty ? .computed : (tMin != nil ? .estimated : .unavailable),
+            fitness: fit?.state ?? .insufficient, baselineReady: baselineReady)
 
         return DailyReport(
             date: day, night: night, naps: naps, napsMin: napsMin, dailySleepMin: dailySleep, sleepDebtH: debt, sri: sri,
             sleepConsistency: consistency,
-            rhr: rhr, hrMax: mx.value, hrMaxMeasured: mx.measured, zoneBounds: bounds, zoneMinutesDay: zoneDay,
+            rhr: restingPulse ?? 60, hrMax: mx.value, hrMaxMeasured: mx.measured, zoneBounds: bounds, zoneMinutesDay: zoneDay,
             steps: steps, activeHours: act.activeHours, activeMinutes: act.activeMinutes, inactiveMin: act.inactiveMin,
             longestSedentaryMin: act.longestSedentary, workouts: workouts, trimp: trimp, kcalTotal: kcal.total, kcalActive: kcal.active,
             movementIndex: mov.score, movementParts: mov.parts,
-            stressTimeline: timeline, stressAvg: valid.isEmpty ? nil : Stats.mean(valid), stressRhythm: rhythm,
-            recovery: rec.score, recoveryLabel: rec.label, recoveryParts: rec.parts, flags: rec.flags,
+            stressTimeline: timeline, stressAvg: valid.isEmpty ? nil : Stats.mean(valid), stressRhythm: rhythm ?? .nan,
+            recovery: rec.score, recoveryLabel: recoveryState == .calibrating ? "In calibrazione" : rec.label,
+            recoveryParts: rec.parts, flags: rec.flags,
             circadianAlignment: alignment, socialJetlagH: jet?.sjl, socialJetlagScH: jet?.sjlSc, chronotypeMSFsc: jet?.msfSc,
-            tempMinH: tMin, windows: windows,
-            vo2max: vo2.value, vo2Source: vo2.source, cardioAgeRaw: ageRaw, cardioAge: Fitness.smooth(previous: b.previousCardioAge, raw: ageRaw),
-            baselineNights: b.nights)
+            tempMinH: tMin ?? .nan, windows: windows,
+            vo2max: fit?.value ?? .nan, vo2Source: fit?.source ?? "Dati insufficienti", cardioAgeRaw: ageRaw ?? .nan,
+            cardioAge: ageRaw.map { Fitness.smooth(previous: b.previousCardioAge, raw: $0) } ?? .nan,
+            baselineNights: b.nights, evidence: evidence, computedAt: input.now)
+    }
+
+    private static func fitness(profile: UserProfile, input: DayInput, rhr: Double?, hrMax: Double, pa: Double,
+                                canEstimatePA: Bool) -> (value: Double, source: String, state: DailyMetricState)? {
+        let lab = profile.labVO2max.flatMap { $0 > 10 && $0 < 95 ? $0 : nil }
+        let apple = input.appleVO2.flatMap { $0 > 10 && $0 < 95 ? $0 : nil }
+        let age = input.appleVO2AgeDays
+        let freshApple = age.map { $0 >= 0 && $0 <= 60 } == true ? apple : nil
+        if let rhr, canEstimatePA {
+            let overrideConfirmed = profile.hrMaxOverride.map { $0 > 100 && $0 < 230 } == true
+            let fit = Fitness.vo2max(profile: profile, rhr: rhr, hrMax: hrMax, hrMaxMeasured: overrideConfirmed,
+                                     paIndex: pa, appleVO2: freshApple, appleAgeDays: age)
+            return fit.value.isFinite ? (fit.value, fit.source, .estimated) : nil
+        }
+        if let lab { return (lab, "Laboratorio", .observed) }
+        if let freshApple { return (freshApple, "Apple", .estimated) }
+        return nil
     }
 }

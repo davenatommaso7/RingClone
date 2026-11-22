@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import WatchConnectivity
 import RingCore
 
@@ -48,8 +49,17 @@ final class PhoneConnectivity: NSObject, WCSessionDelegate, @unchecked Sendable 
 
     func session(_ session: WCSession, didReceive file: WCSessionFile) {
         // il file viene cancellato dal sistema al ritorno da questo metodo: va letto subito
-        guard let data = try? Data(contentsOf: file.fileURL), let chunk = try? MotionChunk.decode(data) else { return }
-        archive.merge(chunk.epochs)                                  // idempotente: i reinvii non duplicano nulla
+        guard let data = try? Data(contentsOf: file.fileURL), let chunk = try? MotionChunk.decode(data), !chunk.epochs.isEmpty else { return }
+        let packet = file.metadata?["motionPacket"] as? String
+        let digest = file.metadata?["motionSHA256"] as? Data
+        if packet != nil || digest != nil {
+            guard let packet, MotionOutbox.isPacketName(packet), let digest,
+                  digest == Data(SHA256.hash(data: data)) else { return }
+        }
+        guard archive.merge(chunk.epochs) else { return }
+        if let packet, let digest, session.activationState == .activated {
+            session.transferUserInfo(["motionArchiveAck": packet, "motionSHA256": digest])
+        }
         onMotion?()
     }
 }

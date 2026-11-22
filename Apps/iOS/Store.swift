@@ -36,7 +36,8 @@ final class Store: ObservableObject {
         if let d = try? Data(contentsOf: profileURL), let p = try? JSONDecoder().decode(UserProfile.self, from: d) {
             profile = p; hasProfile = true
         }
-        if let d = try? Data(contentsOf: historyURL), let h = try? History.decode(d) { reports = h }
+        do { reports = try History.load(from: historyURL) }
+        catch { message = "L’archivio dei report non è leggibile." }
     }
 
     // MARK: - Avvio
@@ -60,8 +61,14 @@ final class Store: ObservableObject {
 
     func update(profile p: UserProfile) async {
         guard p != profile || !hasProfile else { return }
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try JSONEncoder().encode(p).write(to: profileURL, options: .atomic)
+        } catch {
+            message = "Il profilo non è stato salvato. Riprova quando l’archivio è accessibile."
+            return
+        }
         profile = p; hasProfile = true
-        if let d = try? JSONEncoder().encode(p) { try? d.write(to: profileURL, options: .atomic) }
         // età, peso, zone e fabbisogno di sonno entrano in quasi tutti i punteggi: si ricalcola lo storico recente
         if demo { await loadDemo() } else { await refresh(days: 30) }
     }
@@ -91,8 +98,14 @@ final class Store: ObservableObject {
         let today = cal.startOfDay(for: now)
         let assembler = DayAssembler(hk: hk, archive: archive)
         let profile = self.profile
-        var history = reports
+        var history: [DailyReport]
+        do { history = try History.load(from: historyURL) }
+        catch {
+            message = "L’archivio dei report non è leggibile."
+            return
+        }
         var failure: String?
+        var todayNotUpdated = false
         for k in stride(from: days - 1, through: 0, by: -1) {
             guard let day = cal.date(byAdding: .day, value: -k, to: today) else { continue }
             do {
@@ -103,18 +116,25 @@ final class Store: ObservableObject {
                 }.value
                 history = History.upsert(report, into: history, calendar: cal)
             } catch DayAssembler.Failure.noData {
-                continue                                             // orologio non indossato: il giorno resta senza report
+                if k == 0 { todayNotUpdated = true }
+                continue // Una rilettura vuota non identifica una cancellazione.
             } catch {
-                failure = "Lettura di Salute non riuscita (\(error.localizedDescription)). Riprova con l'iPhone sbloccato."
+                failure = "Dati non aggiornati. Riprova con l’iPhone sbloccato."
                 break
             }
         }
+        do { try History.save(history, to: historyURL) }
+        catch {
+            message = "I report non sono stati aggiornati sul dispositivo. Riprova quando l’archivio è accessibile."
+            return
+        }
         calendar = cal
         reports = history
-        message = failure ?? (history.isEmpty ? "Nessun dato in Salute. Indossa l'Apple Watch, anche di notte, e riapri l'app." : nil)
-        if let d = try? History.encode(history) { try? d.write(to: historyURL, options: .atomic) }
+        message = failure ?? (todayNotUpdated ? "Dati di oggi non disponibili. Salute non ha restituito campioni leggibili." : nil)
         archive.prune(olderThan: 40, now: now)
-        if let last = history.last { link.send(WatchSettings(report: last)) }
+        if let last = history.last, last.state(\.zones).hasValue, last.state(\.rhr).hasValue {
+            link.send(WatchSettings(report: last))
+        }
     }
 
     // MARK: - Modalità dimostrativa
@@ -144,7 +164,12 @@ final class Store: ObservableObject {
         demo = false
         message = nil
         calendar = Calendar.current
-        reports = (try? Data(contentsOf: historyURL)).flatMap { try? History.decode($0) } ?? []
+        do { reports = try History.load(from: historyURL) }
+        catch {
+            reports = []
+            message = "L’archivio dei report non è leggibile."
+            return
+        }
         await refresh()
     }
 }

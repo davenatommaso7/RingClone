@@ -117,13 +117,35 @@ public struct SleepSegment: Sendable {
     public let start: Date, end: Date
     /// nil identifica un intervallo a letto. `.unknown` identifica un'osservazione non classificabile.
     public let reportedStage: ReportedSleepStage?
+    public let source: SleepSourceKey?
     public var stage: SleepStage? { reportedStage.flatMap { SleepStage(rawValue: $0.rawValue) } }
-    public init(start: Date, end: Date, stage: SleepStage?) {
-        self.start = start; self.end = end; self.reportedStage = stage.map(ReportedSleepStage.init)
+    public init(start: Date, end: Date, stage: SleepStage?, source: SleepSourceKey? = nil) {
+        self.start = start; self.end = end; self.reportedStage = stage.map(ReportedSleepStage.init); self.source = source
     }
-    public init(start: Date, end: Date, reportedStage: ReportedSleepStage) {
-        self.start = start; self.end = end; self.reportedStage = reportedStage
+    public init(start: Date, end: Date, reportedStage: ReportedSleepStage, source: SleepSourceKey? = nil) {
+        self.start = start; self.end = end; self.reportedStage = reportedStage; self.source = source
     }
+}
+
+/// Identità locale opaca e verificata dall'adattatore. Un UUID di campione da solo non identifica la sorgente.
+public struct SleepSourceKey: Codable, Sendable, Hashable {
+    public let fingerprint: Data
+    public init?(fingerprint: Data) {
+        guard fingerprint.count == 32 else { return nil }
+        self.fingerprint = fingerprint
+    }
+}
+
+public struct SleepSourceSample: Sendable {
+    public let id: UUID
+    public let segment: SleepSegment
+    public init(id: UUID, segment: SleepSegment) { self.id = id; self.segment = segment }
+}
+
+public struct SleepProviderEvidence: Sendable {
+    public let source: SleepSourceKey
+    public let samples: [SleepSourceSample]
+    public init(source: SleepSourceKey, samples: [SleepSourceSample]) { self.source = source; self.samples = samples }
 }
 
 public struct WorkoutRecord: Codable, Sendable, Equatable {
@@ -174,6 +196,14 @@ struct EveningSleepRevision: Codable, Sendable, Hashable {
     /// Solo i tratti rivalutati. Le porzioni assenti da entrambi gli array restano invariate.
     let runs: [DateSpan]
     let awakeRuns: [DateSpan]
+    var source: SleepSourceKey? = nil
+    var nativeWakes: [EarlyWakeObservation]? = nil
+}
+
+struct EarlyWakeObservation: Codable, Sendable, Hashable {
+    let source: SleepSourceKey
+    let sampleID: UUID
+    let runs: [DateSpan]
 }
 
 struct RegularityAlignmentInputs: Codable, Sendable {
@@ -370,9 +400,11 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     var regularityAlignmentInputs: RegularityAlignmentInputs? = nil
     /// Istante del riesame retroattivo del solo SRI e del relativo allineamento.
     public internal(set) var sriReconciledAt: Date? = nil
+    public internal(set) var sriNeedsProvenance: Bool? = nil
     public var calibrating: Bool { state(\.recovery) == .stale || evidence?.baselineReady != true }
 
     public func state(_ metric: KeyPath<DailyEvidence, DailyMetricState>) -> DailyMetricState {
+        if metric == \DailyEvidence.alignment, sriNeedsProvenance == true { return .stale }
         guard let evidence, evidence.version == DailyEvidence.currentVersion else { return .stale }
         return evidence[keyPath: metric]
     }

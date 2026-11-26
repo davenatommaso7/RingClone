@@ -7,6 +7,7 @@ import RingCore
 struct DayAssembler: Sendable {
     let hk: HealthRepository
     let archive: MotionArchive
+    let hardwareScope: UUID?
 
     enum Failure: Error { case noData }
 
@@ -20,7 +21,7 @@ struct DayAssembler: Sendable {
         // quelle facoltative, se falliscono, lasciano semplicemente il campo vuoto.
         async let hrQ = hk.values(.heartRate, from: from, to: to, unit: HealthRepository.bpm)
         async let stepsQ = hk.steps(from: from, to: to)
-        async let sleepQ = hk.sleep(from: from, to: to)
+        async let sleepQ = hk.sleep(from: from, to: to, hardwareScope: hardwareScope)
         async let ibiQ = hk.heartbeatSeries(from: from, to: to)
         async let tempQ = hk.values(.appleSleepingWristTemperature, from: from, to: to, unit: .degreeCelsius())
         async let respQ = hk.values(.respiratoryRate, from: from, to: to, unit: HealthRepository.bpm)
@@ -33,10 +34,13 @@ struct DayAssembler: Sendable {
 
         let hr = try await hrQ
         let steps = try await stepsQ
-        let sleep = try await sleepQ
+        let sleepReading = try await sleepQ
+        let sleep = sleepReading.selected
         let motion = try archive.readEpochs(from: from, to: to)
 
         var input = DayInput.make(day: day, calendar: calendar, now: now, hr: hr, steps: steps, motion: motion, appleSleep: sleep)
+        input.appleSleepSource = sleep.first?.source
+        input.explicitSleepProviders = sleepReading.providers
         input.ibiSeries = (try? await ibiQ) ?? []
         input.hkWorkouts = try await workoutsQ
         input.hkActiveKcal = try await activeQ
@@ -62,7 +66,7 @@ struct DayAssembler: Sendable {
             input.appleVO2 = v.value
             input.appleVO2AgeDays = max(to.timeIntervalSince(v.date) / 86_400, 0)
         }
-        guard !hr.isEmpty || !steps.isEmpty || !motion.isEmpty || !sleep.isEmpty || !input.ibiSeries.isEmpty ||
+        guard !hr.isEmpty || !steps.isEmpty || !motion.isEmpty || !sleep.isEmpty || !sleepReading.providers.isEmpty || !input.ibiSeries.isEmpty ||
                   !input.hkWorkouts.isEmpty || input.hkActiveKcal != nil || input.hkBasalKcal != nil || input.daylightMin != nil else {
             throw Failure.noData
         }

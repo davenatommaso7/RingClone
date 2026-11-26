@@ -1,6 +1,7 @@
 import Foundation
 import HealthKit
 import RingCore
+import CryptoKit
 
 /// Lettura di Apple Salute sull'iPhone (i dati dell'Apple Watch arrivano qui da soli).
 /// L'app non scrive nulla in Salute. Si usano le query classiche di HealthKit, stabili da molte versioni.
@@ -88,9 +89,11 @@ final class HealthRepository: @unchecked Sendable {
     // MARK: - Sonno
 
     /// Intervalli di sonno di UNA sola sorgente (Apple Watch se c'è), mai mescolati tra app diverse
-    func sleep(from a: Date, to b: Date) async throws -> [SleepSegment] {
+    func sleep(from a: Date, to b: Date, hardwareScope: UUID?) async throws
+        -> (selected: [SleepSegment], providers: [SleepProviderEvidence]) {
         let raw = try await samples(HKCategoryType(.sleepAnalysis), from: a, to: b, as: HKCategorySample.self)
         var bySource: [String: [SleepSegment]] = [:]
+        var trusted: [SleepSourceKey: [SleepSourceSample]] = [:]
         for s in raw {
             let stage: ReportedSleepStage?
             switch HKCategoryValueSleepAnalysis(rawValue: s.value) {
@@ -102,12 +105,25 @@ final class HealthRepository: @unchecked Sendable {
             case .inBed?: stage = nil
             default: stage = .unknown
             }
-            let segment = stage.map { SleepSegment(start: s.startDate, end: s.endDate, reportedStage: $0) }
-                ?? SleepSegment(start: s.startDate, end: s.endDate, stage: nil)
-            bySource[s.sourceRevision.source.bundleIdentifier, default: []]
-                .append(segment)
+            let bundle = s.sourceRevision.source.bundleIdentifier
+            let source = Self.sleepSource(bundle: bundle, device: s.device?.localIdentifier, hardwareScope: hardwareScope)
+            let segment = stage.map { SleepSegment(start: s.startDate, end: s.endDate, reportedStage: $0, source: source) }
+                ?? SleepSegment(start: s.startDate, end: s.endDate, stage: nil, source: source)
+            let key = source.map { bundle + "/" + $0.fingerprint.base64EncodedString() } ?? bundle
+            bySource[key, default: []].append(segment)
+            if let source { trusted[source, default: []].append(SleepSourceSample(id: s.uuid, segment: segment)) }
         }
-        return SleepSources.pick(bySource)
+        let providers = trusted.compactMap { source, samples in
+            samples.contains(where: { $0.segment.reportedStage == .wake }) ? SleepProviderEvidence(source: source, samples: samples) : nil
+        }
+        return (SleepSources.pick(bySource), providers)
+    }
+
+    private static func sleepSource(bundle: String, device: String?, hardwareScope: UUID?) -> SleepSourceKey? {
+        guard let hardwareScope, let device, !bundle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !device.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let bytes = try? JSONEncoder().encode([hardwareScope.uuidString, bundle, device]) else { return nil }
+        return SleepSourceKey(fingerprint: Data(SHA256.hash(data: bytes)))
     }
 
     // MARK: - Battito-battito

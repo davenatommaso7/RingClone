@@ -22,6 +22,8 @@ public struct DayInput: Sendable {
     /// epoche contigue da 30 s a partire da `day - 6 h`, sulla griglia allineata al tempo Unix
     public var epochs: [Epoch]
     public var appleSleep: [SleepSegment] = []
+    public var appleSleepSource: SleepSourceKey?
+    public var explicitSleepProviders: [SleepProviderEvidence] = []
     public var ibiSeries: [IBISeries] = []
     /// campioni grezzi di FC (opzionali): usati per i minuti in zona degli allenamenti
     public var hrSamples: [TimedValue] = []
@@ -167,15 +169,16 @@ public enum DailyPipeline {
         let observations = sleepObservations(e, periods: periods, night: night, day: day..<dayEnd)
         let axis = StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier)
         var eveningRevisions = History.eveningRevisions(in: history, successor: day).filter { $0.confirmedAt <= input.now }
-        if let revision = confirmedEveningSleep(input, periods: periods, night: night) {
+        if let revision = eveningRevision(input, periods: periods, night: night, known: eveningRevisions) {
             // Lo stesso esito a un nuovo istante ha precedenza sulle rettifiche intermedie arrivate tardi.
             eveningRevisions = History.mergeEveningRevisions(eveningRevisions + [revision])
         }
         let effective = History.effectiveSleepObservations(observations, target: axis,
                                                            revisions: History.eveningRevisions(in: history, successor: dayEnd),
                                                            visibleAt: input.now)
-        let sri = History.reconciledSRI(for: axis, observations: observations, history: history, calendar: cal,
-                                        visibleAt: input.now, incomingRevisions: eveningRevisions)
+        let regularity = History.reconciledSRI(for: axis, observations: observations, history: history, calendar: cal,
+                                               visibleAt: input.now, incomingRevisions: eveningRevisions)
+        let sri = regularity.score
 
         // ───────── 2. Giorno di calendario al minuto ─────────
         let t0 = e.first?.start ?? day
@@ -341,15 +344,29 @@ public enum DailyPipeline {
             baselineNights: b.nights, evidence: evidence, computedAt: input.now, sleepObservations: effective,
             sleepObservationsBeforeReconciliation: effective == observations ? nil : observations, stressAxis: axis,
             eveningSleepRevisions: eveningRevisions.isEmpty ? nil : eveningRevisions,
-            regularityAlignmentInputs: alignmentInputs, sriReconciledAt: effective == observations ? nil : input.now)
+            regularityAlignmentInputs: alignmentInputs, sriReconciledAt: effective == observations ? nil : input.now,
+            sriNeedsProvenance: regularity.needsProvenance ? true : nil)
+    }
+
+    private static func eveningRevision(_ input: DayInput, periods: SleepPeriods, night: NightReport?,
+                                        known: [EveningSleepRevision]) -> EveningSleepRevision? {
+        guard let day = input.calendar.dateInterval(of: .day, for: input.day.addingTimeInterval(-1)), day.end == input.day else { return nil }
+        let axis = StressDayAxis(start: day.start, end: day.end, timeZoneIdentifier: input.calendar.timeZone.identifier)
+        var revision = confirmedEveningSleep(input, periods: periods, night: night, eveningDay: axis)
+            ?? EveningSleepRevision(eveningDay: axis, confirmedAt: input.now, runs: [], awakeRuns: [])
+        let earlierIDs = Set(known.filter { $0.confirmedAt < input.now }.flatMap { $0.nativeWakes ?? [] }.map(\.sampleID))
+        let sameInstantIDs = Set(known.filter { $0.confirmedAt == input.now }.flatMap { $0.nativeWakes ?? [] }.map(\.sampleID))
+        let wakes = nativeEveningWake(input, evening: day).filter {
+            !earlierIDs.contains($0.sampleID) || sameInstantIDs.contains($0.sampleID)
+        }
+        revision.nativeWakes = wakes.isEmpty ? nil : wakes
+        return revision.runs.isEmpty && revision.awakeRuns.isEmpty && wakes.isEmpty ? nil : revision
     }
 
     private static func confirmedEveningSleep(_ input: DayInput, periods: SleepPeriods,
-                                               night: NightReport?) -> EveningSleepRevision? {
+                                               night: NightReport?, eveningDay: StressDayAxis) -> EveningSleepRevision? {
         guard let night, night.finalWake >= input.day, night.finalWake < input.dayEnd,
-              night.outOfBed <= input.now,
-              let previous = input.calendar.dateInterval(of: .day, for: input.day.addingTimeInterval(-1)),
-              previous.end == input.day else { return nil }
+              night.outOfBed <= input.now else { return nil }
         let end = min(input.dayEnd, input.now)
         let observedRise = night.bedTimingOrigin == .inBedObservation && night.outOfBed > night.finalWake
         let observedAfter = input.epochs.indices.contains { i in
@@ -361,21 +378,69 @@ public enum DailyPipeline {
         // Una notte vicina alla fine dei dati non equivale a una notte conclusa.
         guard observedRise || observedAfter else { return nil }
         let runs = night.sleepRuns.compactMap { span -> DateSpan? in
-            let start = max(span.start, previous.start), end = min(span.end, previous.end)
+            let start = max(span.start, eveningDay.start), end = min(span.end, eveningDay.end)
             return start < end ? DateSpan(start: start, end: end) : nil
         }
         let awakeRuns = Stats.runs(input.epochs.indices.map { i in
             let start = input.epochs[i].start
-            return periods.appleStages[i] == .wake && start >= previous.start && start < previous.end
+            return periods.appleStages[i] == .wake && start >= eveningDay.start && start < eveningDay.end
         }).map { indices in
             let start = input.epochs[indices.lowerBound].start
             let end = input.epochs[indices.upperBound - 1].start.addingTimeInterval(RingConst.epoch)
-            return DateSpan(start: start, end: min(end, previous.end))
+            return DateSpan(start: start, end: min(end, eveningDay.end))
         }
-        guard !runs.isEmpty || !awakeRuns.isEmpty else { return nil }
-        return EveningSleepRevision(eveningDay: StressDayAxis(start: previous.start, end: previous.end,
-                                                              timeZoneIdentifier: input.calendar.timeZone.identifier),
-                                    confirmedAt: input.now, runs: runs, awakeRuns: awakeRuns)
+        let source = input.appleSleepSource.flatMap { selected -> SleepSourceKey? in
+            guard periods.source == "apple", input.appleSleep.allSatisfy({ $0.source == nil || $0.source == selected }) else { return nil }
+            return selected
+        }
+        // Con provenienza verificata la veglia arriva dal canale UUID, anche se la notte è completa.
+        return EveningSleepRevision(eveningDay: eveningDay, confirmedAt: input.now, runs: runs,
+                                     awakeRuns: source == nil ? awakeRuns : [], source: source)
+    }
+
+    private static func nativeEveningWake(_ input: DayInput, evening: DateInterval) -> [EarlyWakeObservation] {
+        let groups = Dictionary(grouping: input.explicitSleepProviders, by: \.source).mapValues { $0.flatMap(\.samples) }
+        let tagged = groups.flatMap { source, samples in samples.map { (source: source, sample: $0) } }
+        let byID = Dictionary(grouping: tagged, by: { $0.sample.id })
+        var conflicted = Set<UUID>()
+        for (id, records) in byID {
+            guard let first = records.first else { continue }
+            if records.contains(where: { entry in
+                entry.source != first.source || entry.sample.segment.start != first.sample.segment.start ||
+                    entry.sample.segment.end != first.sample.segment.end ||
+                    entry.sample.segment.reportedStage != first.sample.segment.reportedStage ||
+                    entry.sample.segment.source.map { $0 != entry.source } == true
+            }) { conflicted.insert(id) }
+        }
+        let ep = RingConst.epoch
+        var observed: [EarlyWakeObservation] = []
+        for (source, samples) in groups {
+            var blocking = samples.filter { sample in
+                conflicted.contains(sample.id) || (sample.segment.reportedStage != nil && sample.segment.reportedStage != .wake)
+            }.map(\.segment)
+            if source == input.appleSleepSource {
+                blocking += input.appleSleep.filter { $0.reportedStage != nil && $0.reportedStage != .wake }
+            }
+            var ids = Set<UUID>()
+            for sample in samples where sample.segment.reportedStage == .wake && !conflicted.contains(sample.id) {
+                guard ids.insert(sample.id).inserted else { continue }
+                let start = max(sample.segment.start, evening.start), end = min(sample.segment.end, evening.end)
+                guard start < end else { continue }
+                let lo = Int((start.timeIntervalSince(evening.start) / ep).rounded(.up))
+                let hi = Int((end.timeIntervalSince(evening.start) / ep).rounded(.down))
+                guard lo < hi else { continue }
+                let covered = (lo..<hi).map { i in
+                    let a = evening.start.addingTimeInterval(Double(i) * ep), b = a.addingTimeInterval(ep)
+                    return !blocking.contains { $0.start < b && a < $0.end }
+                }
+                let spans = Stats.runs(covered).map { range in
+                    DateSpan(start: evening.start.addingTimeInterval(Double(lo + range.lowerBound) * ep),
+                             end: evening.start.addingTimeInterval(Double(lo + range.upperBound) * ep))
+                }
+                if !spans.isEmpty { observed.append(EarlyWakeObservation(source: source, sampleID: sample.id, runs: spans)) }
+            }
+        }
+        return observed.sorted { $0.sampleID.uuidString < $1.sampleID.uuidString }
     }
 
     private static func hasContextSignal(_ epoch: Epoch) -> Bool {
@@ -415,7 +480,8 @@ public enum DailyPipeline {
             Stats.runs(states.map { $0 == state }).map { run in
                 let span = DateSpan(start: epochs[run.lowerBound].start,
                                     end: epochs[run.upperBound - 1].start.addingTimeInterval(RingConst.epoch))
-                return SleepObservation(span: span, asleep: state == .asleep, contextualWake: state == .contextualWake ? true : nil)
+                return SleepObservation(span: span, asleep: state == .asleep,
+                                        contextualWake: state == .asleep ? nil : state == .contextualWake)
             }
         }.sorted { $0.span.start < $1.span.start }
     }

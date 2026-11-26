@@ -193,7 +193,8 @@ public enum Presentation {
         }
         if r.napsMin > 0 { out.append(Line("Sonnellini", "\(r.naps.count) (\(duration(r.napsMin)))")) }
         out.append(Line("Debito di sonno", r.dailySleepMin == nil ? stateLabel(.insufficient) : duration(r.sleepDebtH * 60)))
-        out.append(Line("Regolarità (SRI)", r.sri == nil ? "servono più notti" : number(r.sri)))
+        let sri = r.sriNeedsProvenance == true ? "Da verificare" : (r.sri == nil ? "servono più notti" : number(r.sri))
+        out.append(Line("Regolarità (SRI)", sri))
         out.append(Line("Costanza degli orari", r.sleepConsistency == nil ? "servono più notti" : number(r.sleepConsistency)))
         return out
     }
@@ -251,13 +252,19 @@ public enum Presentation {
     }
 
     public static func circadianLines(_ r: DailyReport) -> [Line] {
-        var out = [Line("Allineamento circadiano", display(r.state(\.alignment), value: number(r.circadianAlignment))),
+        let alignment = r.sriNeedsProvenance == true ? "Da verificare" : display(r.state(\.alignment), value: number(r.circadianAlignment))
+        var out = [Line("Allineamento circadiano", alignment),
                    Line("Social Jetlag", r.socialJetlagH.map { duration(abs($0) * 60) } ?? "servono più notti")]
         if let c = r.chronotypeMSFsc { out.append(Line("Metà del sonno nei giorni liberi", CircadianWindow.clock(c))) }
         let state = r.state(\.tempMinimum)
         let name = state == .estimated ? "Minimo di temperatura (stima da orari)" : "Minimo di temperatura"
         out.append(Line(name, state.hasValue && r.tempMinH.isFinite ? CircadianWindow.clock(r.tempMinH) : stateLabel(state)))
         return out
+    }
+
+    public static func regularityProvenanceNotice(_ r: DailyReport) -> String? {
+        guard r.sriNeedsProvenance == true else { return nil }
+        return "Regolarità da verificare. Per correggere la sera nello storico serve una rilettura dei dati di sonno e veglia."
     }
 
     public static func fitnessLines(_ r: DailyReport) -> [Line] {

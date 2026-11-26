@@ -21,6 +21,9 @@ struct DashboardView: View {
                     if let m = store.message { Notice(text: m, symbol: "info.circle") }
                     if let r = report {
                         DayPicker(reports: store.reports, current: r, calendar: store.calendar, selected: $selected)
+                        if let notice = Presentation.regularityProvenanceNotice(r) {
+                            Notice(text: notice, symbol: "clock.arrow.circlepath")
+                        }
                         if r.evidence == nil {
                             Notice(text: "Dato non aggiornato. Questo report precede i controlli sulla disponibilità dei dati.", symbol: "clock")
                         } else if r.calibrating {

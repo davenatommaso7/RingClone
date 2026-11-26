@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import RingCore
+import UIKit
 
 /// Stato dell'app: profilo, storico dei report, aggiornamento. Tutto ciò che è calcolo sta in RingCore.
 @MainActor
@@ -96,7 +97,7 @@ final class Store: ObservableObject {
     private func refreshOnce(days: Int) async {
         let cal = Calendar.current, now = Date()
         let today = cal.startOfDay(for: now)
-        let assembler = DayAssembler(hk: hk, archive: archive)
+        let assembler = DayAssembler(hk: hk, archive: archive, hardwareScope: UIDevice.current.identifierForVendor)
         let profile = self.profile
         var history: [DailyReport]
         do { history = try History.load(from: historyURL) }

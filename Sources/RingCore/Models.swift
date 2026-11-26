@@ -64,11 +64,13 @@ public struct Epoch: Sendable {
     var observedHR: Double? { hrObserved == false ? nil : hr.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } }
     var hasSteps: Bool { stepsObserved ?? (steps > 0) }
     var hasMotion: Bool { motionObserved ?? (angleChange != nil || motion > 0) }
+    var observedMotion: Double? { hasMotion && motion.isFinite && motion >= 0 ? motion : nil }
 
     public init(start: Date, hr: Double? = nil, motion: Double = 0, angleChange: Double? = nil, steps: Double = 0,
-                appleStage: SleepStage? = nil) {
+                appleStage: SleepStage? = nil, motionObserved: Bool? = nil) {
         self.start = start; self.hr = hr; self.motion = motion; self.angleChange = angleChange
         self.steps = steps; self.appleStage = appleStage
+        self.motionObserved = motionObserved
     }
 }
 
@@ -84,11 +86,15 @@ public struct IBISeries: Sendable {
     public let start: Date
     public let beatTimes: [Double]
     public let precededByGap: [Bool]
+    /// Identità del record alla sorgente, per esempio UUID di un campione HealthKit.
     public let sourceID: UUID?
-    public init(start: Date, beatTimes: [Double], precededByGap: [Bool]? = nil, sourceID: UUID? = nil) {
+    /// Identità dell'acquisizione, se nota a chi produce i frammenti. Un dispositivo comune non basta.
+    public let streamID: UUID?
+    public init(start: Date, beatTimes: [Double], precededByGap: [Bool]? = nil, sourceID: UUID? = nil, streamID: UUID? = nil) {
         self.start = start; self.beatTimes = beatTimes
         self.precededByGap = precededByGap ?? [Bool](repeating: false, count: beatTimes.count)
         self.sourceID = sourceID
+        self.streamID = streamID
     }
     /// Costruisce la serie da una lista di intervalli (ms) contigui
     public init(start: Date, ibiMs: [Double]) {

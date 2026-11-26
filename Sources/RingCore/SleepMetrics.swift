@@ -2,15 +2,20 @@ import Foundation
 
 public enum SleepMetrics {
     static let ep = RingConst.epoch / 60
+    // Policy di qualità notturna v1: almeno 240 s di NN validi in una finestra nominale di 300 s.
+    static let hrvWindowSeconds = 300.0
+    static let minimumObservedHRVSeconds = 240.0
 
-    /// lnRMSSD per epoca su una finestra di ±2,5 min del flusso di battiti (nil se i battiti sono troppo pochi)
+    /// lnRMSSD per epoca su una finestra di ±2,5 min. Una copertura insufficiente restituisce nil.
     public static func lnRMSSDPerEpoch(_ e: [Epoch], beats: [Beat]) -> [Double?] {
         guard !beats.isEmpty else { return e.map { _ in nil } }
         return e.map { x in
             let c = x.start.timeIntervalSinceReferenceDate + RingConst.epoch / 2
-            let r = HRV.range(beats, from: c - 150, to: c + 150)
-            guard let m = HRV.metrics(beats[r], minBeats: 60), m.rmssd > 0 else { return nil }
-            return log(m.rmssd)
+            let from = c - hrvWindowSeconds / 2
+            guard let w = HRV.coveredWindow(beats, from: from, to: from + hrvWindowSeconds,
+                                            minimumSeconds: minimumObservedHRVSeconds, minBeats: 60),
+                  w.metrics.rmssd > 0 else { return nil }
+            return log(w.metrics.rmssd)
         }
     }
 
@@ -51,9 +56,9 @@ public enum SleepMetrics {
 
         // movimenti: cambi di postura (angolo ≥ 5°) o picchi di accelerazione durante il periodo di sonno
         let slice = Array(e[onset...last])
-        let mot = slice.map { $0.motion }
+        let mot = slice.compactMap(\.observedMotion)
         let thr = max(4 * Stats.median(mot), 15)
-        let moving = slice.map { x in (x.angleChange ?? 0) >= 5 || x.motion > thr }
+        let moving = slice.map { x in x.observedMotion.map { (x.angleChange ?? 0) >= 5 || $0 > thr } ?? false }
         let movements = Stats.runs(moving).count
 
         let onsetD = e[onset].start, wakeD = e[last].start.addingTimeInterval(RingConst.epoch)
@@ -70,10 +75,12 @@ public enum SleepMetrics {
                 i += 10
                 guard asleep[w].filter({ $0 }).count >= 9 else { continue }
                 let a = e[w.lowerBound].start.timeIntervalSinceReferenceDate
-                let b = HRV.range(beats, from: a, to: a + 300)
-                guard let m = HRV.metrics(beats[b], minBeats: 120), m.rmssd > 0 else { continue }
+                guard let covered = HRV.coveredWindow(beats, from: a, to: a + hrvWindowSeconds,
+                                                      minimumSeconds: minimumObservedHRVSeconds, minBeats: 120),
+                      covered.metrics.rmssd > 0 else { continue }
+                let m = covered.metrics
                 ln.append(log(m.rmssd)); sdnn.append(m.sdnn)
-                if let r = HRV.respiratoryRate(beats[b]), r.quality >= 0.25 { resp.append(r.rate) }
+                if let r = HRV.respiratoryRate(covered.beats), r.quality >= 0.25 { resp.append(r.rate) }
             }
         }
         // respiro: valore del sistema se c'è (misurato dall'accelerometro del Watch), altrimenti stima dal battito

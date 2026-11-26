@@ -124,6 +124,7 @@ final class HealthRepository: @unchecked Sendable {
                 box.times.append(time); box.gaps.append(precededByGap)
                 if done {
                     box.finished = true
+                    // L'UUID identifica il campione. La query non dimostra la stessa acquisizione fra campioni.
                     c.resume(returning: IBISeries(start: s.startDate, beatTimes: box.times, precededByGap: box.gaps, sourceID: s.uuid))
                 }
             }

@@ -1,5 +1,24 @@
 import Foundation
 
+/// Scansione del recorder su blocchi già oltre il margine di ritardo di acquisizione.
+public enum MotionBlockScan {
+    /// Il cursore descrive l'ultima richiesta elaborata. Nei buchi non vengono accodate epoche.
+    /// Un blocco con epoche rimane il prossimo da leggere finché la scrittura in coda fallisce.
+    public static func run(from start: Date, to end: Date, blockSpan: TimeInterval,
+                           read: (Range<Date>) -> [MotionEpoch]?, enqueue: ([MotionEpoch]) -> Bool,
+                           didScan: (Date) -> Void) {
+        guard blockSpan.isFinite, blockSpan > 0 else { return }
+        var from = start
+        while from < end {
+            let to = min(from.addingTimeInterval(blockSpan), end)
+            guard to > from else { return }
+            if let epochs = read(from..<to), !epochs.isEmpty, !enqueue(epochs) { return }
+            didScan(to)
+            from = to
+        }
+    }
+}
+
 /// Pacchetto di epoche di movimento inviato dal Watch all'iPhone (WatchConnectivity, transferFile o transferUserInfo)
 public struct MotionChunk: Codable, Sendable, Equatable {
     public static let currentVersion = 2

@@ -120,7 +120,9 @@ public enum DailyPipeline {
             // se l'immobilità arriva fino agli ultimi 30 min di dati, la persona sta probabilmente ancora dormendo:
             // la notte viene riportata solo a risveglio avvenuto (l'elaborazione successiva la completa)
             let inProgress = periods.source == "sensori" && m.upperBound >= e.count - 60 && input.now < dayEnd
-            if periods.source == "sensori" { m = max(m.lowerBound - 40, 0)..<min(m.upperBound + 20, e.count) }
+            if let observed = periods.mainObservation {
+                m = max(m.lowerBound - 40, observed.lowerBound)..<min(m.upperBound + 20, observed.upperBound)
+            }
             if !inProgress {
                 let seg = Array(e[m])
                 let st = SleepStaging.stage(seg, lnRMSSD: SleepMetrics.lnRMSSDPerEpoch(seg, beats: beats), model: staging)

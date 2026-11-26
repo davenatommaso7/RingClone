@@ -8,6 +8,8 @@ public struct SleepPeriods: Sendable {
     public var source: String
     /// Epoche di sonno nei sonnellini, al netto dei buchi tra i tratti della stessa sessione.
     var napSleepEpochs = 0
+    /// Contesto di movimento effettivamente osservato attorno al periodo principale da sensori.
+    var mainObservation: Range<Int>? = nil
 }
 
 /// Individua il periodo di sonno principale e i sonnellini sulla finestra di epoche.
@@ -55,28 +57,35 @@ public enum SleepDetection {
         let hrs = e.compactMap { $0.hr }
         let useHR = Double(hrs.count) >= 0.2 * Double(n)
         let hrCeil = useHR ? Stats.median(hrs) + 2 : Double.infinity
-        let hasAngle = Double(e.filter { $0.angleChange != nil }.count) >= 0.5 * Double(n)
-        let counts = e.map { $0.motion }
-        let hasMotion = counts.contains { $0 > 0 }
-        var bouts: [Range<Int>] = []
-        var candidates: [Bool] = []
-        var thr = 0.0
-        if hasMotion {
-            let smooth = Stats.rollingMean(counts, half: 10)                          // ±5 min
-            let ref = e.indices.filter { !useHR || worn[$0] }.map { counts[$0] }
-            thr = max(Stats.percentile(ref.isEmpty ? counts : ref, 40), 1e-6)
-            candidates = e.indices.map { i -> Bool in
+        let motion = e.map(\.observedMotion)
+        let counts = motion.compactMap { $0 }
+        let angles = e.indices.filter { motion[$0] != nil && e[$0].angleChange?.isFinite == true }.count
+        let hasAngle = Double(angles) >= 0.5 * Double(counts.count)
+        let ref = e.indices.filter { !useHR || worn[$0] }.compactMap { motion[$0] }
+        let thr = max(Stats.percentile(ref.isEmpty ? counts : ref, 40), 1e-6)
+        var candidates = [Bool](repeating: false, count: n)
+        let observedRuns = Stats.runs(motion.map { $0 != nil })
+        let observedBouts = observedRuns.map { observed -> (observed: Range<Int>, bouts: [Range<Int>]) in
+            // La media e le unioni si fermano dove manca l'osservazione di movimento.
+            let smooth = Stats.rollingMean(motion[observed].compactMap { $0 }, half: 10) // ±5 min
+            let local = observed.enumerated().map { offset, i -> Bool in
                 guard !useHR || (worn[i] && e[i].hr! <= hrCeil) else { return false }
                 // con l'angolo del braccio: nessuna rotazione > 5° (van Hees 2015); altrimenti soglia adattiva sul movimento
-                if hasAngle, let a = e[i].angleChange { return a < 5 && smooth[i] <= 3 * thr }
-                return smooth[i] <= thr
+                if hasAngle, let a = e[i].angleChange, a.isFinite { return a < 5 && smooth[offset] <= 3 * thr }
+                return smooth[offset] <= thr
             }
-            // un singolo movimento (≤ 1 min) non interrompe il tratto; servono almeno 10 min
-            bouts = Stats.merge(Stats.runs(candidates), maxGap: 2).filter { $0.count >= 20 }
+            candidates.replaceSubrange(observed, with: local)
+            // Un breve movimento osservato (≤ 1 min) non interrompe il tratto; servono almeno 10 min.
+            let bouts = Stats.merge(Stats.runs(local), maxGap: 2).filter { $0.count >= 20 }.map {
+                ($0.lowerBound + observed.lowerBound)..<($0.upperBound + observed.lowerBound)
+            }
+            return (observed: observed, bouts: bouts)
         }
-        let merged = Stats.merge(bouts, maxGap: 60)                                    // buchi ≤ 30 min
-        let sensorMain = merged.filter { $0.count >= minMain && mainEnd.contains(date($0.upperBound)) }.max { $0.count < $1.count }
-        let main = appleMain ?? sensorMain
+        let sensorMain = observedBouts.flatMap { part in
+            Stats.merge(part.bouts, maxGap: 60).map { (range: $0, observation: part.observed) }
+        }.filter { $0.range.count >= minMain && mainEnd.contains(date($0.range.upperBound)) }
+            .max { $0.range.count < $1.range.count }
+        let main = appleMain ?? sensorMain?.range
 
         // sonnellini dai sensori: tratti brevi, molto fermi, con FC vicina a quella del sonno
         var napCeil = useHR ? Stats.percentile(hrs, 25) : Double.infinity
@@ -84,17 +93,19 @@ public enum SleepDetection {
             let mh = e[m].compactMap { $0.hr }
             if mh.count >= 20 { napCeil = Stats.mean(mh) * 1.12 }
         }
-        for b in Stats.merge(bouts, maxGap: 10) where napRange.contains(b.count) && napWindow.contains(date(b.lowerBound)) {
+        let napBouts = observedBouts.flatMap { Stats.merge($0.bouts, maxGap: 10) }
+        for b in napBouts where napRange.contains(b.count) && napWindow.contains(date(b.lowerBound)) {
             if let m = main, overlaps(b, m, margin: 60) { continue }
             if naps.contains(where: { overlaps(b, $0, margin: 20) }) || sessions.contains(where: { overlaps(b, $0.range, margin: 20) }) { continue }
             let h = e[b].compactMap { $0.hr }
             if useHR && (h.count < b.count / 2 || Stats.mean(h) > napCeil) { continue }
-            let quiet = e[b].filter { $0.motion <= thr }.count
+            let quiet = motion[b].compactMap { $0 }.filter { $0 <= thr }.count
             guard Double(quiet) >= 0.85 * Double(b.count) else { continue }
             naps.append(b)
             napSleepEpochs += candidates[b].filter { $0 }.count
         }
         naps.sort { $0.lowerBound < $1.lowerBound }
-        return SleepPeriods(main: main, naps: naps, source: appleMain != nil ? "apple" : "sensori", napSleepEpochs: napSleepEpochs)
+        return SleepPeriods(main: main, naps: naps, source: appleMain != nil ? "apple" : "sensori",
+                            napSleepEpochs: napSleepEpochs, mainObservation: appleMain == nil ? sensorMain?.observation : nil)
     }
 }

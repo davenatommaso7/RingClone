@@ -38,8 +38,7 @@ public struct StagingModel: Sendable {
 public enum SleepStaging {
     public static func features(_ e: [Epoch], lnRMSSD: [Double?]) -> [[Double?]] {
         func cap(_ z: [Double?]) -> [Double?] { z.map { $0.map { Stats.clamp($0, -6, 6) } } }
-        let hasMotion = e.contains { $0.motion > 0 }
-        let motion: [Double?] = hasMotion ? cap(Stats.robustZ(e.map { log1p($0.motion) }, minScale: 0.25)) : e.map { _ in nil }
+        let motion = cap(Stats.robustZ(e.map { $0.observedMotion.map { log1p($0) } }, minScale: 0.25))
         let hr = cap(Stats.robustZ(e.map { $0.hr }, minScale: 1.5))
         let hrv = cap(Stats.robustZ(lnRMSSD, minScale: 0.1))
         let inst = cap(Stats.robustZ(Stats.rollingSD(hr, half: 6), minScale: 0.1))

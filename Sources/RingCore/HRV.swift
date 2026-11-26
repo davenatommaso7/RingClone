@@ -1,5 +1,17 @@
 import Foundation
 
+fileprivate struct NNSpan: Hashable, Sendable {
+    let start: Double
+    let end: Double
+}
+
+fileprivate struct NNWitness: Sendable {
+    let group: Int
+    let ibi: Double
+    let previous: NNSpan?
+    let diff: Double?
+}
+
 /// Battito normale (NN) con tempo assoluto. `diff` è la differenza con l'intervallo precedente
 /// SOLO se i due intervalli sono davvero consecutivi e entrambi validi: così RMSSD e pNN50
 /// non vengono gonfiati dai battiti scartati o dai buchi tra serie diverse.
@@ -7,15 +19,39 @@ public struct Beat: Sendable {
     /// secondi (timeIntervalSinceReferenceDate) alla fine dell'intervallo
     public let t: Double
     /// intervallo battito-battito in ms
-    public let ibi: Double
-    public let diff: Double?
-    /// Tempo del NN precedente della stessa serie, se la coppia è valida.
-    let predecessorTime: Double?
+    public var ibi: Double { witness.ibi }
+    public var diff: Double? { witness.diff }
+    var predecessorTime: Double? { witness.previous?.end }
+    fileprivate let span: NNSpan
+    fileprivate var witness: NNWitness
+    fileprivate var alternateWitnesses: [NNWitness] = []
+
+    fileprivate init(span: NNSpan, witness: NNWitness) {
+        self.t = span.end
+        self.span = span
+        self.witness = witness
+    }
+
+    fileprivate mutating func addWitness(_ other: NNWitness) {
+        if alternateWitnesses.isEmpty { alternateWitnesses.append(witness) }
+        if let index = alternateWitnesses.firstIndex(where: { $0.group == other.group }) {
+            if alternateWitnesses[index].previous == nil, other.previous != nil { alternateWitnesses[index] = other }
+        } else {
+            alternateWitnesses.append(other)
+        }
+        let pairs = alternateWitnesses.filter { $0.previous != nil }
+        if let first = pairs.first, pairs.allSatisfy({ $0.previous == first.previous }) {
+            witness = first
+        } else {
+            witness = NNWitness(group: witness.group, ibi: witness.ibi, previous: nil, diff: nil)
+        }
+    }
 }
 
 /// HRV e respiro dagli intervalli battito-battito (IBI).
 /// Sorgenti: fotopletismografia grezza (`PPG`), serie HealthKit del Watch, ECG.
 public enum HRV {
+    private static let maximumNNMilliseconds = 2000.0
     public struct Metrics: Sendable {
         public let n: Int
         public let meanNN: Double, rmssd: Double, sdnn: Double, pnn50: Double
@@ -28,8 +64,8 @@ public enum HRV {
     public static func validMask(_ x: [Double]) -> [Bool] {
         let n = x.count
         return (0..<n).map { i in
-            guard x[i] >= 300, x[i] <= 2000 else { return false }
-            let w = x[max(0, i - 5)...min(n - 1, i + 5)].filter { $0 >= 300 && $0 <= 2000 }
+            guard x[i] >= 300, x[i] <= maximumNNMilliseconds else { return false }
+            let w = x[max(0, i - 5)...min(n - 1, i + 5)].filter { $0 >= 300 && $0 <= maximumNNMilliseconds }
             guard w.count >= 3 else { return true }
             let med = Stats.median(Array(w))
             return abs(x[i] - med) < 0.2 * med
@@ -38,20 +74,31 @@ public enum HRV {
 
     /// Converte una serie in battiti NN conservando l'adiacenza
     public static func beats(from s: IBISeries) -> [Beat] {
+        beats(from: s, group: 0, blocked: [])
+    }
+
+    private static func beats(from s: IBISeries, group: Int, blocked: Set<NNSpan>) -> [Beat] {
         let t = s.beatTimes, n = t.count
-        guard n >= 2, s.precededByGap.count == n else { return [] }
+        guard n >= 2, s.precededByGap.count == n,
+              (1..<n).allSatisfy({ t[$0 - 1].isFinite && t[$0].isFinite && t[$0] > t[$0 - 1] }) else { return [] }
         var ibi = [Double](repeating: 0, count: n), present = [Bool](repeating: false, count: n)
-        for k in 1..<n where !s.precededByGap[k] && t[k] > t[k - 1] { ibi[k] = (t[k] - t[k - 1]) * 1000; present[k] = true }
+        let absolute = t.map { s.start.timeIntervalSinceReferenceDate + $0 }
+        func span(_ k: Int) -> NNSpan { NNSpan(start: absolute[k - 1], end: absolute[k]) }
+        for k in 1..<n where !s.precededByGap[k] && absolute[k - 1].isFinite && absolute[k].isFinite && absolute[k] > absolute[k - 1] {
+            guard !blocked.contains(span(k)) else { continue }
+            ibi[k] = (t[k] - t[k - 1]) * 1000
+            present[k] = true
+        }
         let idx = (1..<n).filter { present[$0] }
         let mask = validMask(idx.map { ibi[$0] })
         var ok = [Bool](repeating: false, count: n)
         for (j, k) in idx.enumerated() { ok[k] = mask[j] }
-        let t0 = s.start.timeIntervalSinceReferenceDate
         var out: [Beat] = []; out.reserveCapacity(idx.count)
         for k in 1..<n where ok[k] {
             let adjacent = ok[k - 1]
-            out.append(Beat(t: t0 + t[k], ibi: ibi[k], diff: adjacent ? ibi[k] - ibi[k - 1] : nil,
-                            predecessorTime: adjacent ? t0 + t[k - 1] : nil))
+            let witness = NNWitness(group: group, ibi: ibi[k], previous: adjacent ? span(k - 1) : nil,
+                                    diff: adjacent ? ibi[k] - ibi[k - 1] : nil)
+            out.append(Beat(span: span(k), witness: witness))
         }
         return out
     }
@@ -67,23 +114,118 @@ public enum HRV {
                 start = s.start; times = s.beatTimes.map(\.bitPattern); gaps = s.precededByGap
             }
         }
-        var contentByID: [UUID: Content] = [:]
+        enum Source: Hashable {
+            case stream(UUID), record(UUID), anonymous(Int)
+
+            var isAnonymous: Bool { if case .anonymous = self { return true }; return false }
+        }
+        struct Key: Hashable { let source: Source?; let span: NNSpan }
+        var contentByID: [UUID: (Content, UUID?)] = [:]
         var conflicts = Set<UUID>()
         let indexed = series.map { ($0, Content($0)) }
         for (s, content) in indexed {
-            if let id = s.sourceID, let prior = contentByID.updateValue(content, forKey: id), prior != content {
+            if let id = s.sourceID, let prior = contentByID.updateValue((content, s.streamID), forKey: id),
+               prior.0 != content || prior.1 != s.streamID {
                 conflicts.insert(id)
             }
         }
-        let identified = Set(contentByID.compactMap { id, content in conflicts.contains(id) ? nil : content })
+        let identified = Set(indexed.compactMap { s, content -> Content? in
+            if let id = s.sourceID { return conflicts.contains(id) ? nil : content }
+            return s.streamID != nil ? content : nil
+        })
         var ids = Set<UUID>(), anonymous = Set<Content>()
         let unique = indexed.compactMap { s, content -> IBISeries? in
             if let id = s.sourceID {
                 return !conflicts.contains(id) && ids.insert(id).inserted ? s : nil
             }
+            if s.streamID != nil { return s }
             return !identified.contains(content) && anonymous.insert(content).inserted ? s : nil
         }
-        return unique.flatMap { beats(from: $0) }.sorted { $0.t < $1.t }
+        var groups: [Source: Int] = [:]
+        var sources: [Source] = []
+        var fragments: [[IBISeries]] = []
+        for (i, fragment) in unique.enumerated() {
+            let source = fragment.streamID.map(Source.stream) ?? fragment.sourceID.map(Source.record) ?? .anonymous(i)
+            if let group = groups[source] { fragments[group].append(fragment) }
+            else {
+                groups[source] = fragments.count
+                sources.append(source)
+                fragments.append([fragment])
+            }
+        }
+        var result: [Beat] = []
+        var bySpan: [Key: Int] = [:]
+        for (group, samples) in fragments.enumerated() {
+            let source = sources[group]
+            let blocked = samples.count > 1 ? conflictingSpans(samples) : []
+            for sample in samples {
+                for beat in beats(from: sample, group: group, blocked: blocked) {
+                    // Un duplicato anonimo è una singola osservazione, con i testimoni separati.
+                    let key = Key(source: source.isAnonymous ? nil : source, span: beat.span)
+                    if let index = bySpan[key] { result[index].addWitness(beat.witness) }
+                    else {
+                        bySpan[key] = result.count
+                        result.append(beat)
+                    }
+                }
+            }
+        }
+        return result.sorted { $0.t != $1.t ? $0.t < $1.t : $0.span.start < $1.span.start }
+    }
+
+    /// Nello stesso stream, intervalli discordanti o un gap sovrapposto non dimostrano adiacenza.
+    private static func conflictingSpans(_ fragments: [IBISeries]) -> Set<NNSpan> {
+        struct RawInterval: Hashable { let span: NNSpan; let gap: Bool }
+        var intervals = Set<RawInterval>()
+        for s in fragments where s.beatTimes.count >= 2 && s.precededByGap.count == s.beatTimes.count {
+            let absolute = s.beatTimes.map { s.start.timeIntervalSinceReferenceDate + $0 }
+            for i in 1..<absolute.count where absolute[i - 1].isFinite && absolute[i].isFinite && absolute[i] > absolute[i - 1] {
+                intervals.insert(RawInterval(span: NNSpan(start: absolute[i - 1], end: absolute[i]), gap: s.precededByGap[i]))
+            }
+        }
+        let ordered = intervals.sorted {
+            $0.span.start != $1.span.start ? $0.span.start < $1.span.start : $0.span.end < $1.span.end
+        }
+        var blocked = Set<NNSpan>(), frontier = -Double.infinity
+        for i in ordered.indices {
+            let span = ordered[i].span
+            if span.start < frontier || (i + 1 < ordered.count && ordered[i + 1].span.start < span.end) { blocked.insert(span) }
+            frontier = max(frontier, span.end)
+        }
+        return blocked
+    }
+
+    /// Restituisce un solo gruppo che dimostri copertura sufficiente. Nessuna somma fra acquisizioni.
+    static func coveredWindow(_ beats: [Beat], from: Double, to: Double, minimumSeconds: Double,
+                              minBeats: Int) -> (beats: [Beat], metrics: Metrics)? {
+        // Anche un NN che termina al margine destro o subito oltre può coprire parte della finestra.
+        let candidates = beats[range(beats, from: from, to: to + maximumNNMilliseconds / 1000)]
+        var groups: [Int: [Beat]] = [:]
+        for beat in candidates where beat.span.start < to {
+            if beat.alternateWitnesses.isEmpty {
+                groups[beat.witness.group, default: []].append(beat)
+            } else {
+                for witness in beat.alternateWitnesses {
+                    groups[witness.group, default: []].append(Beat(span: beat.span, witness: witness))
+                }
+            }
+        }
+        var qualifying: (beats: [Beat], metrics: Metrics)?
+        for group in groups.values {
+            var through = from, seconds = 0.0
+            for beat in group {
+                let end = min(beat.span.end, to)
+                seconds += max(0, end - max(through, beat.span.start))
+                through = max(through, end)
+            }
+            guard seconds >= minimumSeconds else { continue }
+            let within = group.prefix { $0.t < to }
+            if let result = metrics(within, minBeats: minBeats) {
+                guard qualifying == nil else { return nil }
+                qualifying = (Array(within), result)
+            }
+        }
+        return qualifying
     }
 
     /// Indici [lo, hi) dei battiti con t in [from, to) (ricerca binaria su flusso ordinato)

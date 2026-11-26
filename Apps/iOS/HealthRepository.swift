@@ -92,17 +92,20 @@ final class HealthRepository: @unchecked Sendable {
         let raw = try await samples(HKCategoryType(.sleepAnalysis), from: a, to: b, as: HKCategorySample.self)
         var bySource: [String: [SleepSegment]] = [:]
         for s in raw {
-            guard let v = HKCategoryValueSleepAnalysis(rawValue: s.value) else { continue }
-            let stage: SleepStage?
-            switch v {
-            case .awake: stage = .wake
-            case .asleepCore, .asleepUnspecified: stage = .light
-            case .asleepDeep: stage = .deep
-            case .asleepREM: stage = .rem
-            default: stage = nil                                     // inBed
+            let stage: ReportedSleepStage?
+            switch HKCategoryValueSleepAnalysis(rawValue: s.value) {
+            case .awake?: stage = .wake
+            case .asleepCore?: stage = .light
+            case .asleepUnspecified?: stage = .asleepUnspecified
+            case .asleepDeep?: stage = .deep
+            case .asleepREM?: stage = .rem
+            case .inBed?: stage = nil
+            default: stage = .unknown
             }
+            let segment = stage.map { SleepSegment(start: s.startDate, end: s.endDate, reportedStage: $0) }
+                ?? SleepSegment(start: s.startDate, end: s.endDate, stage: nil)
             bySource[s.sourceRevision.source.bundleIdentifier, default: []]
-                .append(SleepSegment(start: s.startDate, end: s.endDate, stage: stage))
+                .append(segment)
         }
         return SleepSources.pick(bySource)
     }

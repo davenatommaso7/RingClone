@@ -10,6 +10,10 @@ public struct SleepPeriods: Sendable {
     var napSleepEpochs = 0
     /// Contesto di movimento effettivamente osservato attorno al periodo principale da sensori.
     var mainObservation: Range<Int>? = nil
+    var observedBed = false
+    var appleStages: [ReportedSleepStage?] = []
+    var appleContext: [Bool] = []
+    var estimatedNapSleep: [Range<Int>] = []
 }
 
 /// Individua il periodo di sonno principale e i sonnellini sulla finestra di epoche.
@@ -31,18 +35,29 @@ public enum SleepDetection {
         }
 
         // 1) sessioni Apple: segmenti con stadio, uniti se separati da meno di 30 min
-        var staged: [Range<Int>] = [], asleep: [Range<Int>] = []
-        for s in apple.sorted(by: { $0.start < $1.start }) {
-            guard let stage = s.stage else { continue }
+        var appleStages = [ReportedSleepStage?](repeating: nil, count: n)
+        var appleContext = [Bool](repeating: false, count: n)
+        var observedBeds: [Range<Int>] = []
+        for s in apple where s.start < s.end {
             let a = max(0, idx(s.start)), b = min(n, idx(s.end))
             guard a < b else { continue }
-            staged.append(a..<b)
-            if stage.isSleep { asleep.append(a..<b) }
+            for i in a..<b { appleContext[i] = true }
+            guard let stage = s.reportedStage else {
+                if s.start >= t0, s.end <= date(n) { observedBeds.append(a..<b) }
+                continue
+            }
+            for i in a..<b {
+                if let previous = appleStages[i], previous != stage {
+                    appleStages[i] = previous.isSleep && stage.isSleep ? .asleepUnspecified : .unknown
+                } else {
+                    appleStages[i] = stage
+                }
+            }
         }
-        let appleSleepRuns = Stats.merge(asleep, maxGap: 0)
+        let staged = Stats.runs(appleStages.map { $0 != nil && $0 != .unknown })
         let sessions = Stats.merge(staged, maxGap: 60).map { range in
-            let count = appleSleepRuns.filter { range.contains($0.lowerBound) }.map(\.count).reduce(0, +)
-            return (range: range, asleep: count)
+            for i in range { appleContext[i] = true }
+            return (range: range, asleep: appleStages[range].filter { $0?.isSleep == true }.count)
         }
         let appleMain = sessions.filter { $0.asleep >= minMain && mainEnd.contains(date($0.range.upperBound)) }
             .max { $0.asleep < $1.asleep }?.range
@@ -51,6 +66,13 @@ public enum SleepDetection {
         }
         var naps = appleNaps.map { $0.range }
         var napSleepEpochs = appleNaps.map { $0.asleep }.reduce(0, +)
+        var estimatedNapSleep: [Range<Int>] = []
+        let bed = appleMain.flatMap { main in
+            observedBeds.filter { candidate in
+                candidate.lowerBound <= main.lowerBound && candidate.upperBound >= main.upperBound &&
+                    !sessions.contains { $0.range != main && overlaps($0.range, candidate) }
+            }.min { a, b in a.count == b.count ? a.lowerBound < b.lowerBound : a.count < b.count }
+        }
 
         // 2) sensori: candidati = polso fermo + FC bassa, con orologio indossato
         let worn = e.map { $0.hr != nil }
@@ -85,7 +107,7 @@ public enum SleepDetection {
             Stats.merge(part.bouts, maxGap: 60).map { (range: $0, observation: part.observed) }
         }.filter { $0.range.count >= minMain && mainEnd.contains(date($0.range.upperBound)) }
             .max { $0.range.count < $1.range.count }
-        let main = appleMain ?? sensorMain?.range
+        let main = bed ?? appleMain ?? sensorMain?.range
 
         // sonnellini dai sensori: tratti brevi, molto fermi, con FC vicina a quella del sonno
         var napCeil = useHR ? Stats.percentile(hrs, 25) : Double.infinity
@@ -102,10 +124,14 @@ public enum SleepDetection {
             let quiet = motion[b].compactMap { $0 }.filter { $0 <= thr }.count
             guard Double(quiet) >= 0.85 * Double(b.count) else { continue }
             naps.append(b)
-            napSleepEpochs += candidates[b].filter { $0 }.count
+            let runs = Stats.runs(Array(candidates[b]))
+            napSleepEpochs += runs.map(\.count).reduce(0, +)
+            estimatedNapSleep += runs.map { ($0.lowerBound + b.lowerBound)..<($0.upperBound + b.lowerBound) }
         }
         naps.sort { $0.lowerBound < $1.lowerBound }
         return SleepPeriods(main: main, naps: naps, source: appleMain != nil ? "apple" : "sensori",
-                            napSleepEpochs: napSleepEpochs, mainObservation: appleMain == nil ? sensorMain?.observation : nil)
+                            napSleepEpochs: napSleepEpochs, mainObservation: appleMain == nil ? sensorMain?.observation : nil,
+                            observedBed: bed != nil, appleStages: appleStages, appleContext: appleContext,
+                            estimatedNapSleep: estimatedNapSleep)
     }
 }

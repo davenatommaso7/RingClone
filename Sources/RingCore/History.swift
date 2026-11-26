@@ -36,6 +36,8 @@ public struct Baselines: Sendable {
     public var onsetCenter: Double?
     /// report con notte valida degli ultimi 28 giorni (dal più vecchio)
     public var recent: [DailyReport]
+    /// Giorni precedenti con osservazioni esplicite per SRI, anche senza un report notturno.
+    var regularityDays: [DailyReport]
     /// TRIMP dei 28 giorni precedenti (0 per i giorni senza dati), dal più vecchio
     public var trimp28: [Double]
     /// Carico osservabile dei 28 giorni precedenti. nil indica copertura sconosciuta.
@@ -68,6 +70,7 @@ public struct Baselines: Sendable {
         wakeCenter = n14.count >= 3 ? Stats.circularMeanHours(n14.map { $0.wakeH }) : nil
         onsetCenter = n14.count >= 3 ? Stats.circularMeanHours(n14.map { $0.onsetH }) : nil
         recent = within(28).filter { $0.night != nil }
+        regularityDays = within(7).filter { $0.sleepObservations != nil }
         var dayByWorkoutID: [UUID: Date] = [:], workoutsOnMultipleDays = Set<UUID>()
         for report in within(28) {
             for id in report.workouts.compactMap(\.sourceID) {

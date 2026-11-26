@@ -16,11 +16,17 @@ public enum Presentation {
     }
 
     public static func stageName(_ s: SleepStage) -> String {
+        reportedStageName(ReportedSleepStage(s))
+    }
+
+    public static func reportedStageName(_ s: ReportedSleepStage) -> String {
         switch s {
         case .wake: return "Veglia"
         case .light: return "Leggero"
         case .deep: return "Profondo"
         case .rem: return "REM"
+        case .asleepUnspecified: return "Sonno senza fase"
+        case .unknown: return "Fase ignota"
         }
     }
 
@@ -28,7 +34,7 @@ public enum Presentation {
 
     /// Tratto di ipnogramma: stadio costante da `startMin` a `endMin` (minuti da quando si è andati a letto)
     public struct StageRun: Sendable, Equatable, Identifiable {
-        public var stage: SleepStage
+        public var stage: ReportedSleepStage
         public var startMin: Double
         public var endMin: Double
         public var id: Double { startMin }
@@ -38,7 +44,7 @@ public enum Presentation {
         var out: [StageRun] = []
         let k = RingConst.epoch / 60
         for (i, raw) in night.stages.enumerated() {
-            let s = SleepStage(rawValue: raw) ?? .wake
+            let s = night.decodedStage(raw)
             if var last = out.last, last.stage == s {
                 last.endMin = Double(i + 1) * k
                 out[out.count - 1] = last
@@ -49,10 +55,12 @@ public enum Presentation {
         return out
     }
 
-    /// Punto della curva dello stress: ora locale decimale (centro della finestra di 5 min) e valore 0-100
+    /// Punto al centro della finestra: ore trascorse e, se noto, istante reale con etichetta locale.
     public struct StressPoint: Sendable, Equatable, Identifiable {
         public var hour: Double
         public var value: Double
+        public var timestamp: Date? = nil
+        public var clockLabel: String? = nil
         public var id: Double { hour }
     }
 
@@ -60,6 +68,38 @@ public enum Presentation {
         guard !timeline.isEmpty else { return [] }
         let step = 24.0 / Double(timeline.count)
         return timeline.enumerated().compactMap { i, v in v.map { StressPoint(hour: (Double(i) + 0.5) * step, value: $0) } }
+    }
+
+    public static func stressAxis(_ report: DailyReport) -> StressDayAxis? {
+        guard let axis = report.stressAxis, axis.start == report.date, axis.end > axis.start,
+              TimeZone(identifier: axis.timeZoneIdentifier) != nil,
+              Stress.windowCount(from: axis.start, to: axis.end) == report.stressTimeline.count else { return nil }
+        return axis
+    }
+
+    public static func stressPoints(_ report: DailyReport) -> [StressPoint] {
+        guard let axis = stressAxis(report) else { return stressPoints(report.stressTimeline) }
+        return report.stressTimeline.enumerated().compactMap { i, value in
+            guard let value else { return nil }
+            let elapsed = (Double(i) + 0.5) * Stress.windowSeconds
+            let instant = axis.start.addingTimeInterval(elapsed)
+            return StressPoint(hour: elapsed / 3600, value: value, timestamp: instant,
+                               clockLabel: stressClock(instant, axis: axis))
+        }
+    }
+
+    public static func stressClock(_ instant: Date, axis: StressDayAxis) -> String {
+        guard let zone = TimeZone(identifier: axis.timeZoneIdentifier) else { return "n.d." }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        let c = calendar.dateComponents([.hour, .minute], from: instant)
+        let time = String(format: "%02d:%02d", c.hour ?? 0, c.minute ?? 0)
+        let first = zone.secondsFromGMT(for: axis.start)
+        let last = zone.secondsFromGMT(for: axis.end.addingTimeInterval(-1))
+        guard first != last else { return time }
+        let offset = zone.secondsFromGMT(for: instant)
+        let sign = offset < 0 ? "−" : "+"
+        return time + String(format: " UTC%@%02d:%02d", sign, abs(offset) / 3600, abs(offset) / 60 % 60)
     }
 
     public static func stressLabel(_ v: Double) -> String {
@@ -131,20 +171,25 @@ public enum Presentation {
     public static func sleepLines(_ r: DailyReport) -> [Line] {
         var out: [Line] = []
         if let n = r.night {
+            let timing = n.bedTimingOrigin == .inBedObservation ? "" : " (stima)"
             out += [
                 Line("Orari", "\(CircadianWindow.clock(n.onsetH)) – \(CircadianWindow.clock(n.wakeH))"),
                 Line("Sonno totale", duration(n.tstMin)),
-                Line("Tempo a letto", duration(n.tibMin)),
+                Line("Tempo a letto", duration(n.tibMin) + timing),
                 Line("Efficienza", number(n.efficiency, unit: "%")),
                 Line("Leggero", duration(n.lightMin)),
                 Line("Profondo", duration(n.deepMin)),
                 Line("REM", duration(n.remMin)),
                 Line("Sonno ristoratore", number(100 * n.restorativeShare, unit: "%")),
-                Line("Addormentamento", duration(n.solMin)),
+                Line("Addormentamento", duration(n.solMin) + timing),
                 Line("Risvegli", "\(n.awakenings) (\(duration(n.wasoMin)))"),
                 Line("Tratto continuo più lungo", duration(n.longestBoutMin)),
                 Line("Cicli", "\(n.cycles)"),
             ]
+            let onsetIndex = max(0, Int((n.solMin * 60 / RingConst.epoch).rounded()))
+            let unspecified = n.stages.dropFirst(onsetIndex).filter { n.decodedStage($0) == .asleepUnspecified }.count
+            if unspecified > 0 { out.append(Line("Sonno senza fase", duration(Double(unspecified) * RingConst.epoch / 60))) }
+            if !timing.isEmpty { out.append(Line("Origine dell’efficienza", "Tempo a letto stimato dal periodo del sonno")) }
         }
         if r.napsMin > 0 { out.append(Line("Sonnellini", "\(r.naps.count) (\(duration(r.napsMin)))")) }
         out.append(Line("Debito di sonno", r.dailySleepMin == nil ? stateLabel(.insufficient) : duration(r.sleepDebtH * 60)))
@@ -235,11 +280,12 @@ public extension WatchSettings {
 public enum SleepSources {
     public static func pick(_ bySource: [String: [SleepSegment]], preferredPrefix: String = "com.apple.health") -> [SleepSegment] {
         func asleepMin(_ s: [SleepSegment]) -> Double {
-            s.filter { $0.stage?.isSleep == true }.map { $0.end.timeIntervalSince($0.start) / 60 }.reduce(0, +)
+            s.filter { $0.reportedStage?.isSleep == true }.map { $0.end.timeIntervalSince($0.start) / 60 }.reduce(0, +)
         }
         let staged = bySource.filter { asleepMin($0.value) > 0 }
-        let preferred = staged.filter { $0.key.hasPrefix(preferredPrefix) }
-        let pool = preferred.isEmpty ? staged : preferred
+        let available = staged.isEmpty ? bySource.filter { !$0.value.isEmpty } : staged
+        let preferred = available.filter { $0.key.hasPrefix(preferredPrefix) }
+        let pool = preferred.isEmpty ? available : preferred
         // a parità di minuti decide il nome: la scelta non dipende dall'ordine del dizionario
         let best = pool.max { a, b in
             let ma = asleepMin(a.value), mb = asleepMin(b.value)

@@ -159,12 +159,14 @@ private struct Lines: View {
     }
 }
 
-private func stageColor(_ s: SleepStage) -> Color {
+private func stageColor(_ s: ReportedSleepStage) -> Color {
     switch s {
     case .wake: return .orange
     case .light: return .cyan
     case .deep: return .indigo
     case .rem: return .purple
+    case .asleepUnspecified: return .teal
+    case .unknown: return .gray
     }
 }
 
@@ -273,13 +275,14 @@ private struct SleepCard: View {
 
 private struct Hypnogram: View {
     let night: NightReport
-    private let order = [SleepStage.wake, .rem, .light, .deep].map { Presentation.stageName($0) }
+    private let order = [ReportedSleepStage.wake, .rem, .light, .deep, .asleepUnspecified, .unknown]
+        .map(Presentation.reportedStageName)
 
     var body: some View {
         Chart(Presentation.hypnogram(night)) { run in
             RectangleMark(xStart: .value("Inizio", run.startMin / 60),
                           xEnd: .value("Fine", run.endMin / 60),
-                          y: .value("Fase", Presentation.stageName(run.stage)))
+                          y: .value("Fase", Presentation.reportedStageName(run.stage)))
                 .foregroundStyle(stageColor(run.stage))
         }
         .chartYScale(domain: order)
@@ -336,20 +339,50 @@ private struct StressCard: View {
         Card(title: "Stress fisiologico", symbol: "waveform.path.ecg") {
             if report.state(\.stress).hasValue {
                 Lines(lines: Presentation.stressLines(report))
-                Chart(Presentation.stressPoints(report.stressTimeline)) { p in
-                    BarMark(x: .value("Ora", p.hour), y: .value("Stress", p.value), width: .fixed(2))
-                        .foregroundStyle(p.value >= 60 ? Color.red : Color.green)
+                if let axis = Presentation.stressAxis(report) {
+                    datedChart(axis)
+                } else {
+                    Chart(Presentation.stressPoints(report.stressTimeline)) { p in
+                        BarMark(x: .value("Ora", p.hour), y: .value("Stress", p.value), width: .fixed(2))
+                            .foregroundStyle(p.value >= 60 ? Color.red : Color.green)
+                    }
+                    .chartXScale(domain: 0...24)
+                    .chartYScale(domain: 0...100)
+                    .chartXAxisLabel("Asse storico di 24 ore")
+                    .frame(height: 140)
                 }
-                .chartXScale(domain: 0...24)
-                .chartYScale(domain: 0...100)
-                .chartXAxisLabel("ora del giorno")
-                .frame(height: 140)
                 Text("Valutato solo da svegli e da fermi: durante il movimento la frequenza cardiaca sale per lo sforzo, non per lo stress.")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
                 Text(Presentation.stateLabel(report.state(\.stress))).font(.subheadline).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func datedChart(_ axis: StressDayAxis) -> some View {
+        let ticks = stride(from: 0.0, to: axis.end.timeIntervalSince(axis.start), by: 6 * 3600)
+            .map { axis.start.addingTimeInterval($0) }
+        return Chart(Presentation.stressPoints(report)) { p in
+            if let timestamp = p.timestamp {
+                BarMark(x: .value("Ora", timestamp), y: .value("Stress", p.value), width: .fixed(2))
+                    .foregroundStyle(p.value >= 60 ? Color.red : Color.green)
+                    .accessibilityLabel(Text(p.clockLabel ?? "Ora non disponibile"))
+                    .accessibilityValue(Text(Presentation.number(p.value)))
+            }
+        }
+        .chartXScale(domain: axis.start...axis.end)
+        .chartYScale(domain: 0...100)
+        .chartXAxis {
+            AxisMarks(values: ticks) { tick in
+                AxisGridLine()
+                AxisTick()
+                if let instant = tick.as(Date.self) {
+                    AxisValueLabel { Text(Presentation.stressClock(instant, axis: axis)) }
+                }
+            }
+        }
+        .chartXAxisLabel("Ora locale · \(axis.timeZoneIdentifier)")
+        .frame(height: 140)
     }
 }
 

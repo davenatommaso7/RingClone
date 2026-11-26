@@ -65,6 +65,7 @@ public struct Provenance: Codable, Sendable, Equatable {
         guard !typeIdentifier.isEmpty else { throw ProvenanceError.invalid("typeIdentifier") }
         guard !timeZoneIdentifier.isEmpty else { throw ProvenanceError.invalid("timeZoneIdentifier") }
         guard requested.end >= requested.start else { throw ProvenanceError.invalid("requested") }
+        if let observed, !(observed.end >= observed.start) { throw ProvenanceError.invalid("observed") }
         guard sampleCount >= 0, outOfRangeCount >= 0, outOfRangeCount <= sampleCount else {
             throw ProvenanceError.invalid("sampleCount")
         }

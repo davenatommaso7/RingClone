@@ -13,6 +13,14 @@ public enum SleepStage: Int, Codable, CaseIterable, Sendable {
     public var isSleep: Bool { self != .wake }
 }
 
+/// Etichette del report. I valori 0–3 mantengono la codifica storica delle quattro fasi HMM.
+public enum ReportedSleepStage: Int, Codable, CaseIterable, Sendable {
+    case wake = 0, light, deep, rem, asleepUnspecified, unknown
+
+    init(_ stage: SleepStage) { self = Self(rawValue: stage.rawValue) ?? .unknown }
+    public var isSleep: Bool { self != .wake && self != .unknown }
+}
+
 /// Modello delle zone di frequenza cardiaca.
 /// `.percentMax` = 50-60-70-80-90-100 % della FC massima (quello descritto da Ultrahuman, HRmax di Tanaka);
 /// `.karvonen`   = stesse bande ma sulla riserva cardiaca (HRR), più personale se la FC a riposo è nota.
@@ -107,9 +115,15 @@ public struct IBISeries: Sendable {
 /// Intervallo di sonno rilevato da una sorgente esterna (HealthKit sleepAnalysis)
 public struct SleepSegment: Sendable {
     public let start: Date, end: Date
-    /// nil = "a letto" senza stadio
-    public let stage: SleepStage?
-    public init(start: Date, end: Date, stage: SleepStage?) { self.start = start; self.end = end; self.stage = stage }
+    /// nil identifica un intervallo a letto. `.unknown` identifica un'osservazione non classificabile.
+    public let reportedStage: ReportedSleepStage?
+    public var stage: SleepStage? { reportedStage.flatMap { SleepStage(rawValue: $0.rawValue) } }
+    public init(start: Date, end: Date, stage: SleepStage?) {
+        self.start = start; self.end = end; self.reportedStage = stage.map(ReportedSleepStage.init)
+    }
+    public init(start: Date, end: Date, reportedStage: ReportedSleepStage) {
+        self.start = start; self.end = end; self.reportedStage = reportedStage
+    }
 }
 
 public struct WorkoutRecord: Codable, Sendable, Equatable {
@@ -144,7 +158,18 @@ public struct DateSpan: Codable, Sendable, Equatable {
     public var minutes: Double { end.timeIntervalSince(start) / 60 }
 }
 
+public struct SleepObservation: Codable, Sendable, Equatable {
+    public let span: DateSpan
+    public let asleep: Bool
+    public init(span: DateSpan, asleep: Bool) { self.span = span; self.asleep = asleep }
+}
+
+public enum BedTimingOrigin: String, Codable, Sendable, Equatable {
+    case inBedObservation, estimatedFromEpisode
+}
+
 public struct NightReport: Codable, Sendable {
+    static let currentStageEncodingVersion = 1
     public var inBed: Date
     public var sleepOnset: Date
     public var finalWake: Date
@@ -187,9 +212,27 @@ public struct NightReport: Codable, Sendable {
     public var sleepRuns: [DateSpan]
     public var sleepIndex: Double
     public var sleepIndexParts: [String: Double]
+    public internal(set) var bedTimingOrigin: BedTimingOrigin? = nil
+    /// nil nei report storici, che riconoscono soltanto le quattro fasi 0–3.
+    public internal(set) var stageEncodingVersion: Int? = nil
+
+    func decodedStage(_ rawValue: Int) -> ReportedSleepStage {
+        if let modeled = SleepStage(rawValue: rawValue) { return ReportedSleepStage(modeled) }
+        guard stageEncodingVersion == Self.currentStageEncodingVersion else { return .unknown }
+        return ReportedSleepStage(rawValue: rawValue) ?? .unknown
+    }
 
     public var restorativeMin: Double { deepMin + remMin }
     public var restorativeShare: Double { tstMin > 0 ? restorativeMin / tstMin : 0 }
+}
+
+public struct StressDayAxis: Codable, Sendable {
+    public let start: Date
+    public let end: Date
+    public let timeZoneIdentifier: String
+    public init(start: Date, end: Date, timeZoneIdentifier: String) {
+        self.start = start; self.end = end; self.timeZoneIdentifier = timeZoneIdentifier
+    }
 }
 
 public struct CircadianWindow: Codable, Sendable, Equatable {
@@ -270,7 +313,7 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     public var movementIndex: Double
     public var movementParts: [String: Double]
     // stress e recupero
-    public var stressTimeline: [Double?]         // 288 finestre da 5 min sul giorno di calendario
+    public var stressTimeline: [Double?]         // finestre di 5 min trascorsi nel giorno civile
     public var stressAvg: Double?
     public var stressRhythm: Double
     public var recovery: Double
@@ -294,6 +337,9 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     public internal(set) var evidence: DailyEvidence? = nil
     /// Istante di acquisizione del report, usato per scegliere una revisione dello stesso giorno.
     public internal(set) var computedAt: Date? = nil
+    /// Tratti classificati; i buchi sono ignoti. nil nei report antecedenti al contratto di osservabilità.
+    public internal(set) var sleepObservations: [SleepObservation]? = nil
+    public internal(set) var stressAxis: StressDayAxis? = nil
     public var calibrating: Bool { state(\.recovery) == .stale || evidence?.baselineReady != true }
 
     public func state(_ metric: KeyPath<DailyEvidence, DailyMetricState>) -> DailyMetricState {

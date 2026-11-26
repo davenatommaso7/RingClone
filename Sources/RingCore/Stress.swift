@@ -2,6 +2,11 @@ import Foundation
 
 /// Stress fisiologico: attivazione del sistema nervoso autonomo a riposo (non stress psicologico percepito).
 public enum Stress {
+    static let windowSeconds = 300.0
+
+    static func windowCount(from start: Date, to end: Date) -> Int {
+        max(0, Int(end.timeIntervalSince(start) / windowSeconds))
+    }
     /// Punteggio 0-100 di una finestra di 5 min in veglia, senza movimento né allenamento.
     /// Combina FC rispetto alla FC a riposo, indice di Baevsky e RMSSD rispetto alla baseline notturna
     /// (di giorno l'RMSSD è fisiologicamente più basso che di notte: si confronta con baseline - 0,5 in scala logaritmica, cioè ≈ -40 %).
@@ -22,24 +27,26 @@ public enum Stress {
         return 100 * Stats.logistic(1.2 * Stats.clamp(z, -4, 4) - 0.4)
     }
 
-    /// Linea dello stress sul giorno di calendario: 288 finestre da 5 min, nil dove non è valutabile
+    /// Linea dello stress sul giorno civile: finestre di 5 minuti trascorsi, nil dove non è valutabile
     /// (sonno, allenamento e 10 min successivi, camminata, orologio non indossato).
     public static func timeline(hrPerMin: [Double?], stepsPerMin: [Double], awake: [Bool], inWorkout: [Bool],
-                                dayStart: Date, beats: [Beat], rhr: Double, baselines b: Baselines, nightLnRMSSD: Double?) -> [Double?] {
+                                dayStart: Date, beats: [Beat], rhr: Double, baselines b: Baselines, nightLnRMSSD: Double?,
+                                dayEnd: Date? = nil) -> [Double?] {
         let n = min(hrPerMin.count, stepsPerMin.count, awake.count, inWorkout.count) / 5
         let base = b.lnRMSSD.ready ? b.lnRMSSD.center : nightLnRMSSD
         let t0 = dayStart.timeIntervalSinceReferenceDate
-        var out = [Double?](repeating: nil, count: 288)
+        let count = dayEnd.map { windowCount(from: dayStart, to: $0) } ?? 288
+        var out = [Double?](repeating: nil, count: count)
         var prevSteps = 0.0
-        for w in 0..<min(n, 288) {
+        for w in 0..<min(n, count) {
             let r = (w * 5)..<(w * 5 + 5)
             let steps = r.map { stepsPerMin[$0] }.reduce(0, +)
             defer { prevSteps = steps }
             let hr = r.compactMap { hrPerMin[$0] }
             let recovering = ((max(w * 5 - 10, 0))..<(w * 5 + 5)).contains { inWorkout[$0] }
             guard r.allSatisfy({ awake[$0] }), !recovering, steps < 60, prevSteps < 150, hr.count >= 3 else { continue }
-            let a = t0 + Double(w) * 300
-            let br = beats.isEmpty ? 0..<0 : HRV.range(beats, from: a, to: a + 300)
+            let a = t0 + Double(w) * windowSeconds
+            let br = beats.isEmpty ? 0..<0 : HRV.range(beats, from: a, to: a + windowSeconds)
             out[w] = window(hr: Stats.mean(hr), beats: beats[br], rhr: rhr, lnRMSSDBase: base, lnRMSSDSpread: b.lnRMSSD.spread)
         }
         return out
@@ -48,11 +55,13 @@ public enum Stress {
     /// Stress Rhythm: parte da 100 a mezzanotte e perde punti per ogni finestra di stress alto (> 70) fuori
     /// dall'allenamento. Lo stress serale pesa di più (disturba il sonno), quello del mattino meno.
     /// `wakeH`/`bedH` = orari abituali di risveglio e di addormentamento (ore decimali).
-    public static func rhythm(_ timeline: [Double?], wakeH: Double, bedH: Double) -> Double {
+    public static func rhythm(_ timeline: [Double?], wakeH: Double, bedH: Double,
+                              dayStart: Date? = nil, calendar: Calendar = .current) -> Double {
         var score = 100.0
         for (w, s) in timeline.enumerated() {
             guard let s, s > 70 else { continue }
-            let h = (Double(w) + 0.5) / 12
+            let h = dayStart.map { Stats.hourOfDay($0.addingTimeInterval((Double(w) + 0.5) * windowSeconds), calendar) }
+                ?? (Double(w) + 0.5) / 12
             let sinceWake = Stats.wrap24(h - wakeH), toBed = Stats.wrap24(bedH - h)
             let weight = toBed <= 4 ? 1.5 : sinceWake <= 3 ? 0.5 : 1.0
             score -= weight * (0.6 + 0.4 * Stats.scale(s, 70, 100))

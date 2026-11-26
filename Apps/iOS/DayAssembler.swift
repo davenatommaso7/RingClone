@@ -12,7 +12,7 @@ struct DayAssembler: Sendable {
 
     func input(for day: Date, calendar: Calendar, now: Date) async throws -> DayInput {
         let from = day.addingTimeInterval(-DayInput.lookback)                       // la notte comincia la sera prima
-        let dayEnd = calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400)
+        let dayEnd = calendar.dateInterval(of: .day, for: day)?.end ?? day.addingTimeInterval(86_400)
         let to = min(dayEnd, now)
         guard to > from else { throw Failure.noData }
 
@@ -44,7 +44,7 @@ struct DayAssembler: Sendable {
         input.daylightMin = try? await daylightQ
 
         // Valori notturni: si considerano solo i campioni dentro il sonno che termina in questo giorno
-        let asleep = sleep.filter { $0.stage?.isSleep == true && $0.end > day && $0.start < day.addingTimeInterval(18 * 3600) }
+        let asleep = sleep.filter { $0.reportedStage?.isSleep == true && $0.end > day && $0.start < day.addingTimeInterval(18 * 3600) }
         let window: ClosedRange<Date>
         if let a = asleep.map({ $0.start }).min(), let b = asleep.map({ $0.end }).max(), a < b {
             window = a...b

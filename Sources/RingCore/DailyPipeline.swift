@@ -41,7 +41,7 @@ public struct DayInput: Sendable {
         self.day = day; self.calendar = calendar; self.now = now; self.epochs = epochs
     }
 
-    public var dayEnd: Date { calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400) }
+    public var dayEnd: Date { calendar.dateInterval(of: .day, for: day)?.end ?? day.addingTimeInterval(86_400) }
 
     /// Costruisce le epoche a partire dai campioni così come arrivano dai sensori o da HealthKit.
     /// - FC: media dei campioni nell'epoca; i buchi fino a 15 min sono interpolati, oltre restano nil (orologio non indossato)
@@ -51,7 +51,7 @@ public struct DayInput: Sendable {
                             motion: [MotionEpoch], appleSleep: [SleepSegment] = []) -> DayInput {
         let ep = RingConst.epoch
         let i0 = Int(((day.timeIntervalSince1970 - lookback) / ep).rounded(.down))
-        let end = min(calendar.date(byAdding: .day, value: 1, to: day) ?? day.addingTimeInterval(86_400), now)
+        let end = min(calendar.dateInterval(of: .day, for: day)?.end ?? day.addingTimeInterval(86_400), now)
         let n = max(Int(((end.timeIntervalSince1970 / ep).rounded(.down))) - i0, 0)
         var e = (0..<n).map { Epoch(start: Date(timeIntervalSince1970: Double(i0 + $0) * ep)) }
         guard n > 0 else { return DayInput(day: day, calendar: calendar, now: now, epochs: []) }
@@ -125,9 +125,23 @@ public enum DailyPipeline {
             }
             if !inProgress {
                 let seg = Array(e[m])
-                let st = SleepStaging.stage(seg, lnRMSSD: SleepMetrics.lnRMSSDPerEpoch(seg, beats: beats), model: staging)
-                night = SleepMetrics.night(seg, stages: st, beats: beats, calendar: cal, tempSeries: input.skinTempSeries,
-                                           tempNight: input.skinTempNight, respRate: input.hkRespRate, spo2: input.spo2)
+                let st: [ReportedSleepStage]
+                if periods.observedBed {
+                    st = periods.appleStages[m].map { $0 ?? .unknown }
+                } else {
+                    let modeled = SleepStaging.stage(seg, lnRMSSD: SleepMetrics.lnRMSSDPerEpoch(seg, beats: beats), model: staging)
+                    st = modeled.enumerated().map { offset, inferred in
+                        let estimate = ReportedSleepStage(inferred)
+                        guard periods.source == "apple" else { return estimate }
+                        let native = periods.appleStages[m.lowerBound + offset] ?? .unknown
+                        guard native.isSleep, native != .asleepUnspecified, estimate.isSleep else { return native }
+                        return estimate
+                    }
+                }
+                night = SleepMetrics.night(seg, reportedStages: st, beats: beats, calendar: cal,
+                                           tempSeries: input.skinTempSeries, tempNight: input.skinTempNight,
+                                           respRate: input.hkRespRate, spo2: input.spo2,
+                                           bedTimingOrigin: periods.observedBed ? .inBedObservation : .estimatedFromEpisode)
                 if let onset = night?.sleepOnset {
                     let asleep = seg.indices.map { seg[$0].start >= onset && st[$0].isSleep }
                     let vitals = HeartRate.restingNight(seg.map(\.observedHR), asleep: asleep)
@@ -150,9 +164,10 @@ public enum DailyPipeline {
         let napsMin = Double(periods.napSleepEpochs) * ep / 60
         let dailySleep = night.map { $0.tstMin + napsMin }
         let debt = SleepMetrics.sleepDebtH(b.previousDebtDays.map { $0.sleepMin } + [dailySleep], needH: profile.sleepNeedH)
-        var sriDays = lastWeek.map { $0.date }, sriSpans = lastWeek.flatMap { ($0.night?.sleepRuns ?? []) + $0.naps }
-        if let n = night { sriDays.append(day); sriSpans += n.sleepRuns + naps }
-        let sri = SleepMetrics.sri(days: sriDays, sleep: sriSpans, calendar: cal)
+        let observations = sleepObservations(e, periods: periods, night: night, day: day..<dayEnd)
+        var observedDays = Dictionary(uniqueKeysWithValues: b.regularityDays.map { ($0.date, $0.sleepObservations ?? []) })
+        observedDays[day] = observations
+        let sri = SleepMetrics.sri(observationsByDay: observedDays, calendar: cal)
 
         // ───────── 2. Giorno di calendario al minuto ─────────
         let t0 = e.first?.start ?? day
@@ -260,10 +275,10 @@ public enum DailyPipeline {
         let bedRef = b.onsetCenter ?? night?.onsetH ?? 23
         let timeline = restingPulse.map { pulse in
             Stress.timeline(hrPerMin: observedHRMin, stepsPerMin: stepsMin, awake: awake, inWorkout: inWorkout, dayStart: day,
-                            beats: beats, rhr: pulse, baselines: b, nightLnRMSSD: night?.rmssd.map { log($0) })
-        } ?? Array(repeating: nil, count: 288)
+                            beats: beats, rhr: pulse, baselines: b, nightLnRMSSD: night?.rmssd.map { log($0) }, dayEnd: dayEnd)
+        } ?? Array(repeating: nil, count: Stress.windowCount(from: day, to: dayEnd))
         let valid = timeline.compactMap { $0 }
-        let rhythm = valid.count >= 12 ? Stress.rhythm(timeline, wakeH: wakeRef, bedH: bedRef) : nil
+        let rhythm = valid.count >= 12 ? Stress.rhythm(timeline, wakeH: wakeRef, bedH: bedRef, dayStart: day, calendar: cal) : nil
         let observedLoad = Array(b.observedTrimp28.suffix(27)) + [loadKnown ? trimp : nil]
         let acwr = !replayAcrossDays && observedLoad.allSatisfy { $0 != nil } ? Recovery.acwr(observedLoad.compactMap { $0 }) : nil
         let rec = Recovery.score(sleepIndex: night?.sleepIndex, night: night, stressRhythm: rhythm,
@@ -316,7 +331,46 @@ public enum DailyPipeline {
             tempMinH: tMin ?? .nan, windows: windows,
             vo2max: fit?.value ?? .nan, vo2Source: fit?.source ?? "Dati insufficienti", cardioAgeRaw: ageRaw ?? .nan,
             cardioAge: ageRaw.map { Fitness.smooth(previous: b.previousCardioAge, raw: $0) } ?? .nan,
-            baselineNights: b.nights, evidence: evidence, computedAt: input.now)
+            baselineNights: b.nights, evidence: evidence, computedAt: input.now, sleepObservations: observations,
+            stressAxis: StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier))
+    }
+
+    private static func sleepObservations(_ epochs: [Epoch], periods: SleepPeriods, night: NightReport?,
+                                          day: Range<Date>) -> [SleepObservation] {
+        guard let first = epochs.first else { return [] }
+        var episode = periods.appleContext
+        for nap in periods.naps { for i in nap { episode[i] = true } }
+        if let main = periods.main { for i in main { episode[i] = true } }
+        var estimated = [Bool?](repeating: nil, count: epochs.count)
+        for run in periods.estimatedNapSleep { for i in run { estimated[i] = true } }
+        if periods.source == "sensori", let night {
+            let offset = Int((night.inBed.timeIntervalSince(first.start) / RingConst.epoch).rounded())
+            for (j, raw) in night.stages.enumerated() {
+                let i = offset + j
+                guard epochs.indices.contains(i), let stage = ReportedSleepStage(rawValue: raw) else { continue }
+                episode[i] = true
+                if stage == .wake { estimated[i] = false }
+                else if stage.isSleep, epochs[i].start >= night.sleepOnset { estimated[i] = true }
+            }
+        }
+        let states = epochs.indices.map { i -> Bool? in
+            let epoch = epochs[i]
+            guard day.contains(epoch.start) else { return nil }
+            if let stage = periods.appleStages[i] { return stage == .unknown ? nil : stage.isSleep }
+            if periods.appleContext[i] { return nil }
+            if let state = estimated[i] { return state }
+            // La veglia contestuale richiede segnale osservato fuori dai periodi di sonno o a letto.
+            guard !episode[i], epoch.observedHR != nil || epoch.observedMotion != nil || (epoch.hasSteps && epoch.steps > 0)
+            else { return nil }
+            return false
+        }
+        return [false, true].flatMap { asleep in
+            Stats.runs(states.map { $0 == asleep }).map { run in
+                let span = DateSpan(start: epochs[run.lowerBound].start,
+                                    end: epochs[run.upperBound - 1].start.addingTimeInterval(RingConst.epoch))
+                return SleepObservation(span: span, asleep: asleep)
+            }
+        }.sorted { $0.span.start < $1.span.start }
     }
 
     private static func fitness(profile: UserProfile, input: DayInput, rhr: Double?, hrMax: Double, pa: Double,

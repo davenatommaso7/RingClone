@@ -25,6 +25,13 @@ public enum SleepMetrics {
     public static func night(_ e: [Epoch], stages st: [SleepStage], beats: [Beat], calendar cal: Calendar,
                              tempSeries: [TimedValue] = [], tempNight: Double? = nil,
                              respRate hkResp: Double? = nil, spo2: Double? = nil) -> NightReport? {
+        night(e, reportedStages: st.map(ReportedSleepStage.init), beats: beats, calendar: cal,
+              tempSeries: tempSeries, tempNight: tempNight, respRate: hkResp, spo2: spo2)
+    }
+
+    static func night(_ e: [Epoch], reportedStages st: [ReportedSleepStage], beats: [Beat], calendar cal: Calendar,
+                      tempSeries: [TimedValue] = [], tempNight: Double? = nil, respRate hkResp: Double? = nil,
+                      spo2: Double? = nil, bedTimingOrigin: BedTimingOrigin = .estimatedFromEpisode) -> NightReport? {
         let n = e.count
         guard n > 0, st.count == n else { return nil }
         var asleep = st.map { $0.isSleep }
@@ -46,8 +53,8 @@ public enum SleepMetrics {
         let awak = wakeRuns.filter { $0.count >= 2 }.count                              // risveglio ≥ 1 min
         let longest = Double(Stats.runs(core.map { $0.isSleep }).map { $0.count }.max() ?? 0) * ep
         var shifts = 0
-        for i in 1..<core.count where core[i] != core[i - 1] { shifts += 1 }
-        func minutes(_ s: SleepStage) -> Double { Double(core.filter { $0 == s }.count) * ep }
+        for i in 1..<core.count where core[i] != core[i - 1] && core[i].rawValue <= 3 && core[i - 1].rawValue <= 3 { shifts += 1 }
+        func minutes(_ s: ReportedSleepStage) -> Double { Double(core.filter { $0 == s }.count) * ep }
         let remLat = core.firstIndex(of: .rem).map { Double($0) * ep }
 
         // cicli = episodi di REM (tratti REM separati da meno di 15 min contano come uno, durata ≥ 3 min)
@@ -102,7 +109,8 @@ public enum SleepMetrics {
             rmssd: ln.count >= 3 ? exp(Stats.mean(ln)) : nil, sdnn: sdnn.count >= 3 ? Stats.mean(sdnn) : nil,
             respRate: respRate, spo2: spo2,
             skinTemp: tempNight ?? t?.value, skinTempDev: nil, tempMinH: t?.minimumAt.map { Stats.hourOfDay($0, cal) },
-            stages: st.map { $0.rawValue }, sleepRuns: runs, sleepIndex: 0, sleepIndexParts: [:])
+            stages: st.map { $0.rawValue }, sleepRuns: runs, sleepIndex: 0, sleepIndexParts: [:], bedTimingOrigin: bedTimingOrigin,
+            stageEncodingVersion: NightReport.currentStageEncodingVersion)
     }
 
     /// Punteggio di durata: pieno tra il fabbisogno personale (meno mezz'ora) e 9,5 h (8,5 h dopo i 65 anni).
@@ -166,29 +174,81 @@ public enum SleepMetrics {
 
     /// Sleep Regularity Index (Phillips et al. 2017): probabilità di essere nello stesso stato (sonno/veglia)
     /// in due istanti a 24 h di distanza, riscalata tra -100 e 100.
-    /// `days` = giorni (inizio del giorno di calendario) con la notte registrata; `sleep` = tutti i tratti di sonno.
-    /// Si confrontano, minuto per minuto, le finestre [giorno - 12 h, giorno + 12 h) di coppie di giorni consecutivi.
+    /// Compatibilità: il chiamante dichiara copertura completa nelle finestre di 24 h centrate a mezzanotte.
+    /// In questo contratto la veglia è il complemento dei tratti di sonno. La pipeline usa osservazioni esplicite.
     public static func sri(days: [Date], sleep: [DateSpan], calendar: Calendar, minPairs: Int = 3) -> Double? {
         let d = days.sorted()
         guard d.count > minPairs else { return nil }
-        let spans = sleep.sorted { $0.start < $1.start }
+        let spans = sleep.filter { $0.start < $0.end }
+        guard !spans.isEmpty else { return nil }
         func mask(_ day: Date) -> [Bool] {
             let t0 = day.addingTimeInterval(-12 * 3600)
             var m = [Bool](repeating: false, count: 1440)
             for s in spans {
                 let a = Int((s.start.timeIntervalSince(t0) / 60).rounded()), b = Int((s.end.timeIntervalSince(t0) / 60).rounded())
-                guard b > 0, a < 1440 else { continue }
-                for i in max(a, 0)..<min(b, 1440) { m[i] = true }
+                let lo = max(a, 0), hi = min(b, 1440)
+                guard lo < hi else { continue }
+                for i in lo..<hi { m[i] = true }
             }
             return m
         }
         var agree = 0, total = 0, pairs = 0
+        var hasObservedSleep = false
         for k in 1..<d.count {
             guard let next = calendar.date(byAdding: .day, value: 1, to: d[k - 1]), calendar.isDate(next, inSameDayAs: d[k]) else { continue }
             let a = mask(d[k - 1]), b = mask(d[k])
+            if a.contains(true) || b.contains(true) { hasObservedSleep = true }
             for i in 0..<1440 where a[i] == b[i] { agree += 1 }
             total += 1440; pairs += 1
         }
-        return pairs >= minPairs ? -100 + 200 * Double(agree) / Double(total) : nil
+        return hasObservedSleep && total > 0 && pairs >= minPairs ? -100 + 200 * Double(agree) / Double(total) : nil
+    }
+
+    /// Confronti a distanza reale di 24 ore, limitati alle epoche classificate dei giorni civili consecutivi.
+    public static func sri(observationsByDay: [Date: [SleepObservation]], calendar: Calendar, minPairs: Int = 3) -> Double? {
+        var observationsByMidnight: [Date: [SleepObservation]] = [:]
+        for (date, observations) in observationsByDay {
+            observationsByMidnight[calendar.startOfDay(for: date), default: []] += observations
+        }
+        let days = observationsByMidnight.keys.sorted()
+        guard days.count >= 2, days.count > minPairs else { return nil }
+        let secondsApart = 86_400.0, epoch = RingConst.epoch
+        func mask(_ day: Date) -> [UInt8] {
+            guard let bounds = calendar.dateInterval(of: .day, for: day) else { return [] }
+            var values = [UInt8](repeating: 0, count: Int(bounds.duration / epoch))
+            for observation in observationsByMidnight[day] ?? [] {
+                let start = max(bounds.start, observation.span.start)
+                let end = min(bounds.end, observation.span.end)
+                guard start < end else { continue }
+                let lo = Int((start.timeIntervalSince(bounds.start) / epoch).rounded())
+                let hi = min(Int((end.timeIntervalSince(bounds.start) / epoch).rounded()), values.count)
+                // Bit distinti: 0 o conflitto fra stati (3) significa evidenza insufficiente.
+                guard lo < hi else { continue }
+                let state: UInt8 = observation.asleep ? 2 : 1
+                for i in lo..<hi { values[i] |= state }
+            }
+            return values
+        }
+        var agree = 0, total = 0, pairs = 0
+        var previous = mask(days[0])
+        for i in 1..<days.count {
+            let day = days[i], before = days[i - 1]
+            let current = mask(day)
+            defer { previous = current }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: before), calendar.isDate(next, inSameDayAs: day) else { continue }
+            let offset = (secondsApart - day.timeIntervalSince(before)) / epoch
+            guard offset.rounded() == offset else { continue }
+            let shift = Int(offset)
+            var comparable = 0
+            for a in previous.indices {
+                let b = a + shift
+                guard current.indices.contains(b), (1...2).contains(previous[a]), (1...2).contains(current[b]) else { continue }
+                comparable += 1
+                if previous[a] == current[b] { agree += 1 }
+            }
+            if comparable > 0 { total += comparable; pairs += 1 }
+        }
+        guard total > 0, pairs >= minPairs else { return nil }
+        return -100 + 200 * Double(agree) / Double(total)
     }
 }

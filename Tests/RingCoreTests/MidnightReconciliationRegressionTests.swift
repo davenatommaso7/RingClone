@@ -79,7 +79,7 @@ final class MidnightReconciliationRegressionTests: XCTestCase {
         XCTAssertEqual(projected[1], originals[1]) // Veglia esplicita o di provenienza legacy ignota.
     }
 
-    func testPartialNightKeepsConfirmationAndClosedReplacementRestoresOriginal() throws {
+    func testOnlyExplicitEveningWakeCanWithdrawTheCorrespondingSleep() throws {
         let history = awakeHistory(ending: 7), previous = try XCTUnwrap(history.last), day = testDay(8)
         let first = makeReport(day, sleep: [night(day, fromMin: -30, toMin: 240)], history: history)
         let corrected = History.upsert(first, into: history, calendar: testCal)
@@ -92,16 +92,40 @@ final class MidnightReconciliationRegressionTests: XCTestCase {
         XCTAssertEqual(state(try XCTUnwrap(preserved.first { $0.date == previous.date }), at: mid)?.asleep, true)
         XCTAssertEqual(preserved.last?.eveningSleepRevisions?.count, 1)
 
-        let replacement = makeReport(day, now: now.addingTimeInterval(120),
-                                     sleep: [night(day, fromMin: 30, toMin: 270)], history: preserved)
-        let withdrawn = History.upsert(replacement, into: preserved, calendar: testCal)
+        let afterMidnight = night(day, fromMin: 30, toMin: 270)
+        let withoutEvening = makeReport(day, now: now.addingTimeInterval(120), sleep: [afterMidnight], history: preserved)
+        XCTAssertEqual(withoutEvening.night?.tstMin, 240)
+        let unchanged = History.upsert(withoutEvening, into: preserved, calendar: testCal)
+        let stillCorrected = try XCTUnwrap(unchanged.first { $0.date == previous.date })
+        XCTAssertEqual(state(stillCorrected, at: mid)?.asleep, true)
+        XCTAssertEqual(try XCTUnwrap(stillCorrected.sri), 100 - 200 * 30.0 / (3 * 1440), accuracy: 1e-9)
+        XCTAssertEqual(stillCorrected.sriReconciledAt, first.computedAt)
+        XCTAssertEqual(unchanged.last?.eveningSleepRevisions?.count, 1)
+
+        let shorter = makeReport(day, now: now.addingTimeInterval(150),
+                                 sleep: [night(day, fromMin: -10, toMin: 240)], history: unchanged)
+        let partlyConfirmed = History.upsert(shorter, into: unchanged, calendar: testCal)
+        XCTAssertEqual(partlyConfirmed.first { $0.date == previous.date }?.sleepObservations, stillCorrected.sleepObservations)
+
+        let shortAwake = SleepSegment(start: mid, end: day, stage: .wake)
+        let partiallyAwake = makeReport(day, now: now.addingTimeInterval(180), sleep: [shortAwake, afterMidnight], history: partlyConfirmed)
+        let revised = History.upsert(partiallyAwake, into: partlyConfirmed, calendar: testCal)
+        let split = try XCTUnwrap(revised.first { $0.date == previous.date })
+        XCTAssertEqual(state(split, at: mid.addingTimeInterval(-60))?.asleep, true)
+        XCTAssertEqual(state(split, at: mid)?.asleep, false)
+        XCTAssertEqual(try XCTUnwrap(split.sri), 100 - 200 * 15.0 / (3 * 1440), accuracy: 1e-9)
+
+        let fullAwake = SleepSegment(start: day.addingTimeInterval(-1800), end: day, stage: .wake)
+        let replacement = makeReport(day, now: now.addingTimeInterval(240), sleep: [fullAwake, afterMidnight], history: revised)
+        let withdrawn = History.upsert(replacement, into: revised, calendar: testCal)
         let restored = try XCTUnwrap(withdrawn.first { $0.date == previous.date })
         XCTAssertEqual(restored.sri, 100)
         XCTAssertEqual(restored.sleepObservations, previous.sleepObservations)
         XCTAssertNil(restored.sleepObservationsBeforeReconciliation)
         XCTAssertEqual(restored.sriReconciledAt, replacement.computedAt)
-        XCTAssertEqual(withdrawn.last?.eveningSleepRevisions?.count, 2)
+        XCTAssertEqual(withdrawn.last?.eveningSleepRevisions?.count, 4)
         XCTAssertEqual(withdrawn.last?.eveningSleepRevisions?.last?.runs, [])
+        XCTAssertEqual(withdrawn.last?.eveningSleepRevisions?.last?.awakeRuns, [DateSpan(start: fullAwake.start, end: fullAwake.end)])
         XCTAssertEqual(try History.encode(History.upsert(first, into: withdrawn, calendar: testCal)), try History.encode(withdrawn))
     }
 

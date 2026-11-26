@@ -171,8 +171,9 @@ public struct SleepObservation: Codable, Sendable, Equatable {
 struct EveningSleepRevision: Codable, Sendable, Hashable {
     let eveningDay: StressDayAxis
     let confirmedAt: Date
-    /// Un array vuoto è una sostituzione confermata che non contribuisce sonno alla sera precedente.
+    /// Solo i tratti rivalutati. Le porzioni assenti da entrambi gli array restano invariate.
     let runs: [DateSpan]
+    let awakeRuns: [DateSpan]
 }
 
 struct RegularityAlignmentInputs: Codable, Sendable {

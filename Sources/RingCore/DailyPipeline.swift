@@ -168,8 +168,8 @@ public enum DailyPipeline {
         let axis = StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier)
         var eveningRevisions = History.eveningRevisions(in: history, successor: day).filter { $0.confirmedAt <= input.now }
         if let revision = confirmedEveningSleep(input, periods: periods, night: night) {
-            let previous = History.latestEveningRevision(eveningRevisions, target: revision.eveningDay, visibleAt: input.now)
-            if previous?.runs != revision.runs {
+            let previous = History.visibleEveningRevisions(eveningRevisions, target: revision.eveningDay, visibleAt: input.now).last
+            if previous?.runs != revision.runs || previous?.awakeRuns != revision.awakeRuns {
                 eveningRevisions = History.mergeEveningRevisions(eveningRevisions + [revision])
             }
         }
@@ -366,9 +366,18 @@ public enum DailyPipeline {
             let start = max(span.start, previous.start), end = min(span.end, previous.end)
             return start < end ? DateSpan(start: start, end: end) : nil
         }
+        let awakeRuns = Stats.runs(input.epochs.indices.map { i in
+            let start = input.epochs[i].start
+            return periods.appleStages[i] == .wake && start >= previous.start && start < previous.end
+        }).map { indices in
+            let start = input.epochs[indices.lowerBound].start
+            let end = input.epochs[indices.upperBound - 1].start.addingTimeInterval(RingConst.epoch)
+            return DateSpan(start: start, end: min(end, previous.end))
+        }
+        guard !runs.isEmpty || !awakeRuns.isEmpty else { return nil }
         return EveningSleepRevision(eveningDay: StressDayAxis(start: previous.start, end: previous.end,
                                                               timeZoneIdentifier: input.calendar.timeZone.identifier),
-                                    confirmedAt: input.now, runs: runs)
+                                    confirmedAt: input.now, runs: runs, awakeRuns: awakeRuns)
     }
 
     private static func hasContextSignal(_ epoch: Epoch) -> Bool {

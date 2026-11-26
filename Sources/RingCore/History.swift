@@ -146,7 +146,10 @@ public enum History {
             let scopeA = (a.eveningDay.start, a.eveningDay.end, a.eveningDay.timeZoneIdentifier)
             let scopeB = (b.eveningDay.start, b.eveningDay.end, b.eveningDay.timeZoneIdentifier)
             if scopeA != scopeB { return scopeA < scopeB }
-            return a.runs.lexicographicallyPrecedes(b.runs) { ($0.start, $0.end) < ($1.start, $1.end) }
+            if a.runs != b.runs {
+                return a.runs.lexicographicallyPrecedes(b.runs) { ($0.start, $0.end) < ($1.start, $1.end) }
+            }
+            return a.awakeRuns.lexicographicallyPrecedes(b.awakeRuns) { ($0.start, $0.end) < ($1.start, $1.end) }
         }
     }
 
@@ -155,22 +158,22 @@ public enum History {
             .filter { $0.eveningDay.end == successor && $0.confirmedAt >= successor })
     }
 
-    static func latestEveningRevision(_ revisions: [EveningSleepRevision], target: StressDayAxis,
-                                       visibleAt: Date) -> EveningSleepRevision? {
+    static func visibleEveningRevisions(_ revisions: [EveningSleepRevision], target: StressDayAxis,
+                                        visibleAt: Date) -> [EveningSleepRevision] {
         let eligible = Set(revisions.filter { $0.eveningDay == target && $0.confirmedAt <= visibleAt })
         let byTime = Dictionary(grouping: eligible, by: \.confirmedAt)
         // Una collisione allo stesso istante non è una conferma di quale versione sia corretta.
-        for time in byTime.keys.sorted(by: >) {
-            if let proposals = byTime[time], proposals.count == 1 { return proposals.first }
+        return byTime.keys.sorted().compactMap { time in
+            guard let proposals = byTime[time], proposals.count == 1 else { return nil }
+            return proposals.first
         }
-        return nil
     }
 
     static func effectiveSleepObservations(_ original: [SleepObservation], target: StressDayAxis,
                                            revisions: [EveningSleepRevision], visibleAt: Date) -> [SleepObservation] {
-        guard let revision = latestEveningRevision(revisions, target: target, visibleAt: visibleAt), !revision.runs.isEmpty
-        else { return original }
-        let runs = revision.runs.sorted { $0.start < $1.start }
+        let visible = visibleEveningRevisions(revisions, target: target, visibleAt: visibleAt)
+        let runs = eveningSleepRuns(after: visible)
+        guard !runs.isEmpty else { return original }
         return original.flatMap { observation -> [SleepObservation] in
             guard !observation.asleep, observation.contextualWake == true else { return [observation] }
             var cursor = observation.span.start
@@ -191,6 +194,31 @@ public enum History {
             }
             return parts
         }
+    }
+
+    private static func eveningSleepRuns(after revisions: [EveningSleepRevision]) -> [DateSpan] {
+        var sleep: [DateSpan] = []
+        for revision in revisions {
+            sleep += revision.runs
+            for awake in revision.awakeRuns {
+                sleep = sleep.flatMap { span -> [DateSpan] in
+                    guard span.start < awake.end, awake.start < span.end else { return [span] }
+                    var remaining: [DateSpan] = []
+                    if span.start < awake.start { remaining.append(DateSpan(start: span.start, end: awake.start)) }
+                    if awake.end < span.end { remaining.append(DateSpan(start: awake.end, end: span.end)) }
+                    return remaining
+                }
+            }
+        }
+        var merged: [DateSpan] = []
+        for span in sleep.sorted(by: { $0.start < $1.start }) {
+            if let last = merged.last, span.start <= last.end {
+                merged[merged.count - 1].end = max(last.end, span.end)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
     }
 
     static func reconciledSRI(for day: StressDayAxis, observations: [SleepObservation],

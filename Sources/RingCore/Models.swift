@@ -446,7 +446,7 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     public internal(set) var sectorFreshness: ReportSectorFreshness? = nil
     var nightReadProof: NightReadProof? = nil
     var archivedNightVariants: [ArchivedNight]? = nil
-    /// 0 = assente, 1 = FC osservata sotto Z1, 2...6 = zona 1...5. Indicizzata su minuti civili trascorsi.
+    /// Minuti civili trascorsi. 0 = assente, 1 = sotto Z1, 2...6 = zone 1...5, 7 = osservato senza zona verificabile.
     var pulseZoneCells: Data? = nil
     public var calibrating: Bool { state(\.recovery) == .stale || evidence?.baselineReady != true }
 

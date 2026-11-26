@@ -237,7 +237,10 @@ public enum DailyPipeline {
         let mx = HeartRate.hrMax(profile: profile, workoutPeaks: pastWorkouts.map(\.maxHR) + hk.map(\.maxHR))
         let bounds = profile.zoneModel == .karvonen && restingPulse == nil ? [] :
             HeartRate.zoneBounds(model: profile.zoneModel, rhr: restingPulse ?? 0, hrMax: mx.value)
-        let zoneDay = HeartRate.zoneMinutes(perMinute: observedHRMin, bounds: bounds)
+        let archivedPulse = profile.zoneModel == .karvonen && night?.rhr == nil ?
+            archivedRestingPulse(history, axis: axis, visibleAt: input.now, calendar: cal) : nil
+        let dayBounds = archivedPulse.map { HeartRate.zoneBounds(model: profile.zoneModel, rhr: $0, hrMax: mx.value) } ?? bounds
+        let zoneDay = HeartRate.zoneMinutes(perMinute: observedHRMin, bounds: dayBounds)
 
         // ───────── 4. Allenamenti ─────────
         let samples = input.hrSamples.filter { $0.value > 25 && $0.value < 240 }.sorted { $0.date < $1.date }
@@ -332,7 +335,7 @@ public enum DailyPipeline {
         let recoveryState: DailyMetricState = rec.score.isFinite ? (baselineReady ? .computed : .calibrating) : .insufficient
         let evidence = DailyEvidence(
             rhr: night?.rhr != nil ? .computed : (restingPulse != nil ? .estimated : (dayHR.isEmpty ? .unavailable : .insufficient)),
-            zones: !bounds.isEmpty && !dayHR.isEmpty ? .computed : .insufficient,
+            zones: !dayBounds.isEmpty && !dayHR.isEmpty ? .computed : .insufficient,
             steps: stepsKnown ? .observed : .unavailable, activity: activityKnown ? .computed : .insufficient,
             energyActive: activeEnergy, energyTotal: totalEnergy, trimp: loadKnown ? .computed : .insufficient,
             movement: activityKnown || !workouts.isEmpty ? .estimated : .insufficient,
@@ -341,9 +344,10 @@ public enum DailyPipeline {
             tempMinimum: !tMins.isEmpty ? .computed : (tMin != nil ? .estimated : .unavailable),
             fitness: fit?.state ?? .insufficient, baselineReady: baselineReady)
 
-        let pulseCells = evidence.zones.hasValue ? Data(observedHRMin.map { value in
-            value.map { UInt8(HeartRate.zone(of: $0, bounds: bounds) + 1) } ?? 0
-        }) : nil
+        let pulseCells = dayHR.isEmpty ? nil : Data(observedHRMin.map { value -> UInt8 in
+            guard let value else { return 0 }
+            return dayBounds.isEmpty ? 7 : UInt8(HeartRate.zone(of: value, bounds: dayBounds) + 1)
+        })
         let freshness = ReportSectorFreshness(nightAt: night == nil ? nil : input.now,
                                               daytimePulseAt: observedHRMin.indices.contains { !inBed[$0] && observedHRMin[$0] != nil } ? input.now : nil,
                                               activeEnergyAt: activeEnergy == .observed ? input.now : nil,
@@ -352,7 +356,7 @@ public enum DailyPipeline {
         return DailyReport(
             date: day, night: night, naps: naps, napsMin: napsMin, dailySleepMin: dailySleep, sleepDebtH: debt, sri: sri,
             sleepConsistency: consistency,
-            rhr: restingPulse ?? 60, hrMax: mx.value, hrMaxMeasured: mx.measured, zoneBounds: bounds, zoneMinutesDay: zoneDay,
+            rhr: restingPulse ?? 60, hrMax: mx.value, hrMaxMeasured: mx.measured, zoneBounds: dayBounds, zoneMinutesDay: zoneDay,
             steps: steps, activeHours: act.activeHours, activeMinutes: act.activeMinutes, inactiveMin: act.inactiveMin,
             longestSedentaryMin: act.longestSedentary, workouts: workouts, trimp: trimp, kcalTotal: kcal.total, kcalActive: kcal.active,
             movementIndex: mov.score, movementParts: mov.parts,
@@ -369,6 +373,17 @@ public enum DailyPipeline {
             regularityAlignmentInputs: alignmentInputs, sriReconciledAt: effective == observations ? nil : input.now,
             sriNeedsProvenance: regularity.needsProvenance ? true : nil, sectorFreshness: freshness,
             nightReadProof: night.map { nightReadProof(input, periods: periods, night: $0) }, pulseZoneCells: pulseCells)
+    }
+
+    private static func archivedRestingPulse(_ history: [DailyReport], axis: StressDayAxis, visibleAt: Date,
+                                             calendar: Calendar) -> Double? {
+        let matches = history.filter { $0.date == axis.start && $0.stressAxis == axis }
+        guard let prior = History.onePerDay(matches, calendar: calendar).first, prior.state(\.rhr) == .computed,
+              prior.nightReadProof?.closed != false, let pulse = prior.night?.rhr, pulse.isFinite, pulse > 0 else { return nil }
+        let observedAt = prior.sectorFreshness?.nightPreserved == true ? prior.sectorFreshness?.nightAt
+            : (prior.sectorFreshness?.nightAt ?? prior.computedAt)
+        guard let observedAt, observedAt <= visibleAt else { return nil }
+        return pulse
     }
 
     private static func eveningRevision(_ input: DayInput, periods: SleepPeriods, night: NightReport?) -> EveningSleepRevision? {
@@ -413,7 +428,7 @@ public enum DailyPipeline {
         guard nightIsClosed(input, periods: periods, night: night), compatible else {
             return NightReadProof(closed: false, source: source, explicitWake: [])
         }
-        let explicitWake = source.map { key in
+        let explicitWake: [DateSpan] = source.map { key in
             let observed = input.appleSleep.filter { $0.source == key && $0.reportedStage == .wake }
             return Stats.runs(input.epochs.indices.map { i in
                 guard periods.appleStages[i] == .wake else { return false }

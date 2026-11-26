@@ -20,19 +20,20 @@ final class MixedPartialNightRegressionTests: XCTestCase {
 
     private func snapshot(at time: Double, stages: [SleepSegment] = [], key: SleepSourceKey? = nil,
                           pulse samples: [TimedValue] = [], active: Double? = nil, basal: Double? = nil,
-                          providers: [SleepProviderEvidence] = [], history: [DailyReport] = []) -> DailyReport {
+                          providers: [SleepProviderEvidence] = [], profile: UserProfile = testProfile,
+                          history: [DailyReport] = []) -> DailyReport {
         var input = DayInput.make(day: day, calendar: clock, now: at(time), hr: samples, steps: [], motion: [], appleSleep: stages)
         input.appleSleepSource = key; input.explicitSleepProviders = providers
         input.hkActiveKcal = active; input.hkBasalKcal = basal
-        return DailyPipeline.run(input, profile: testProfile, history: history)
+        return DailyPipeline.run(input, profile: profile, history: history)
     }
 
-    private func initial(key: SleepSourceKey, history: [DailyReport] = []) -> DailyReport {
+    private func initial(key: SleepSourceKey, profile: UserProfile = testProfile, history: [DailyReport] = []) -> DailyReport {
         let overnight = pulse(20..<65, bpm: 54).flatMap { sample in
             [sample, TimedValue(date: sample.date.addingTimeInterval(30), value: sample.value)]
         }
         return snapshot(at: 780, stages: [segment(-25, 245, nil), segment(-20, 240, .light, source: key)], key: key,
-                        pulse: overnight, active: 200, basal: 1500, history: history)
+                        pulse: overnight, active: 200, basal: 1500, profile: profile, history: history)
     }
 
     private func reread(_ snapshot: DailyReport, in history: [DailyReport]) throws -> [DailyReport] {
@@ -156,5 +157,96 @@ final class MixedPartialNightRegressionTests: XCTestCase {
             XCTAssertEqual(try History.encode(reread(mixed, in: archive)), try History.encode(archive))
         }
         XCTAssertEqual(try History.encode(chronological), try History.encode(delayed))
+    }
+
+    func testObservedEnergyConflictSurvivesBothReplaysUntilLaterObservation() throws {
+        let key = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 6, count: 32)))
+        let original = initial(key: key)
+        let conflictTime = 840 + 0.25 / 60, laterTime = 840 + 0.75 / 60
+        let a = snapshot(at: conflictTime, active: 0, basal: 1500)
+        let b = snapshot(at: conflictTime, active: 40, basal: 1500)
+        let fallback = snapshot(at: 840 + 0.50 / 60)
+        let observedLater = snapshot(at: laterTime, active: 0, basal: 1500)
+        func assertAmbiguous(_ archive: [DailyReport], file: StaticString = #filePath, line: UInt = #line) throws {
+            let report = try current(archive)
+            XCTAssertEqual(report.state(\.energyActive), .stale, file: file, line: line)
+            XCTAssertEqual(report.state(\.energyTotal), .stale, file: file, line: line)
+            XCTAssertTrue(report.kcalActive.isNaN && report.kcalTotal.isNaN, file: file, line: line)
+            XCTAssertEqual(report.sectorFreshness?.activeEnergyAt, at(conflictTime), file: file, line: line)
+            XCTAssertEqual(report.sectorFreshness?.totalEnergyAt, at(conflictTime), file: file, line: line)
+            let energy = Presentation.activityLines(report).filter { $0.name.hasPrefix("Calorie") }
+            XCTAssertEqual(energy.count, 2, file: file, line: line)
+            XCTAssertTrue(energy.allSatisfy { $0.value.contains("Dato non aggiornato") && !$0.value.lowercased().contains("nan") },
+                          file: file, line: line)
+        }
+        for (first, second) in [(a, b), (b, a)] {
+            let merged = try reread(second, in: reread(first, in: [original]))
+            try assertAmbiguous(merged)
+            for replay in [a, b] { try assertAmbiguous(reread(replay, in: merged)) }
+            let withoutObservation = try reread(fallback, in: merged)
+            try assertAmbiguous(withoutObservation)
+            let resolved = try current(reread(observedLater, in: withoutObservation))
+            XCTAssertEqual(resolved.state(\.energyActive), .observed)
+            XCTAssertEqual(resolved.state(\.energyTotal), .observed)
+            XCTAssertEqual(resolved.kcalActive, 0)
+            XCTAssertEqual(resolved.kcalTotal, 1500)
+            XCTAssertEqual(resolved.sectorFreshness?.activeEnergyAt, at(laterTime))
+        }
+    }
+
+    func testKarvonenUsesDatedNightlyRHRForDaytimePulseOnly() throws {
+        let key = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 7, count: 32)))
+        var profile = testProfile
+        profile.zoneModel = .karvonen; profile.hrMaxOverride = 190
+        let original = initial(key: key, profile: profile)
+        let daytime = pulse(720..<730, bpm: 140)
+        let observed = snapshot(at: 840, pulse: daytime, profile: profile, history: [original])
+        XCTAssertNil(observed.night)
+        XCTAssertEqual(observed.state(\.rhr), .insufficient)
+        let merged = try current(reread(observed, in: [original]))
+        XCTAssertEqual(merged.state(\.rhr), .computed)
+        XCTAssertEqual(merged.rhr, 54)
+        XCTAssertEqual(merged.sectorFreshness?.nightAt, at(780))
+        XCTAssertEqual(merged.sectorFreshness?.daytimePulseAt, at(840))
+        // Z2 = [54 + 0,6 * 136, 54 + 0,7 * 136) = [135,6, 149,2).
+        XCTAssertEqual(try XCTUnwrap(merged.zoneBounds.dropFirst().first), 135.6, accuracy: 1e-9)
+        XCTAssertEqual(merged.zoneMinutesDay, [0, 10, 0, 0, 0])
+        XCTAssertEqual(merged.state(\.zones), .computed)
+
+        let withoutRest = snapshot(at: 780, stages: [segment(-25, 245, nil), segment(-20, 240, .light, source: key)],
+                                   key: key, profile: profile)
+        let withoutReference = snapshot(at: 840, pulse: daytime, profile: profile, history: [withoutRest])
+        let unknown = try current(reread(withoutReference, in: [withoutRest]))
+        XCTAssertNil(unknown.night?.rhr)
+        XCTAssertEqual(unknown.state(\.zones), .insufficient)
+        XCTAssertEqual(unknown.sectorFreshness?.daytimePulseAt, at(840))
+        XCTAssertTrue(Presentation.heartLines(unknown).contains { $0.value.contains("Zone non calcolabili") })
+
+        profile.hrMaxOverride = 205
+        let changedLimits = snapshot(at: 840, pulse: daytime, profile: profile, history: [original])
+        let incompatible = try current(reread(changedLimits, in: [original]))
+        XCTAssertEqual(incompatible.rhr, 54)
+        XCTAssertEqual(incompatible.state(\.zones), .insufficient)
+        XCTAssertEqual(incompatible.sectorFreshness?.daytimePulseAt, at(840))
+    }
+
+    func testClosedNightCanReplaceAnExplicitlyIncompleteFirstReading() throws {
+        let key = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 8, count: 32)))
+        let open = snapshot(at: 240, stages: [segment(-20, 240, .light, source: key)], key: key)
+        XCTAssertEqual(open.night?.tstMin, 260)
+        XCTAssertEqual(open.nightReadProof?.closed, false)
+        let closed = snapshot(at: 780, stages: [segment(-5, 215, nil), segment(0, 210, .light, source: key)], key: key)
+        XCTAssertEqual(closed.nightReadProof?.closed, true)
+        let improved = try current(reread(closed, in: [open]))
+        XCTAssertEqual(improved.night?.tstMin, 210)
+        XCTAssertEqual(improved.sectorFreshness?.nightAt, at(780))
+        XCTAssertEqual(improved.sectorFreshness?.nightPreserved, false)
+
+        var legacy = open
+        legacy.nightReadProof = nil; legacy.sectorFreshness = nil
+        let uncertain = try current(reread(closed, in: [legacy]))
+        XCTAssertEqual(uncertain.night?.tstMin, 260)
+        XCTAssertEqual(uncertain.sectorFreshness?.nightAt, at(240))
+        XCTAssertEqual(uncertain.sectorFreshness?.nightPreserved, true)
     }
 }

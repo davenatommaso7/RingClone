@@ -210,7 +210,8 @@ public enum Presentation {
             out.append(Line("Dati notturni", "Lettura del " + reportTime(date, in: r)))
         }
         if r.sectorFreshness?.nightPreserved == true, let date = r.sectorFreshness?.daytimePulseAt {
-            out.append(Line("FC diurna", "Lettura del " + reportTime(date, in: r)))
+            let availability = r.state(\.zones).hasValue ? "" : " Zone non calcolabili con le soglie disponibili."
+            out.append(Line("FC diurna", "Lettura del " + reportTime(date, in: r) + "." + availability))
         }
         if let n = r.night {
             out += [

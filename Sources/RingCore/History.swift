@@ -458,6 +458,7 @@ public enum History {
     private static func canReplace(_ old: ArchivedNight, with candidate: ArchivedNight) -> Bool {
         guard let proof = candidate.proof, proof.closed else { return false }
         if let previousSource = old.proof?.source, previousSource != proof.source { return false }
+        if old.proof?.closed == false { return true }
         let previous = old.night.sleepRuns.isEmpty ? [DateSpan(start: old.night.sleepOnset, end: old.night.finalWake)]
             : old.night.sleepRuns
         let sameSource = proof.source != nil && proof.source == old.proof?.source
@@ -493,10 +494,11 @@ public enum History {
             let newer = sectorTime(incoming, at: time, state: state)
             guard older != nil || newer != nil else { continue }
             let usePrior = (older ?? .distantPast) >= (newer ?? .distantPast)
-            report[keyPath: value] = usePrior ? prior[keyPath: value] : incoming[keyPath: value]
-            freshness[keyPath: time] = usePrior ? older : newer
             let conflict = older == newer && prior[keyPath: value] != incoming[keyPath: value]
-            report.evidence?[keyPath: state] = conflict ? .stale : .observed
+            let observed = usePrior ? prior[keyPath: value] : incoming[keyPath: value]
+            report[keyPath: value] = conflict ? .nan : observed
+            freshness[keyPath: time] = usePrior ? older : newer
+            report.evidence?[keyPath: state] = report[keyPath: value].isFinite ? .observed : .stale
         }
         if let active = freshness.activeEnergyAt, let total = freshness.totalEnergyAt, active > total {
             report.evidence?.energyTotal = .stale
@@ -548,15 +550,12 @@ public enum History {
 
     private static func mergeDaytimePulse(in report: inout DailyReport, from prior: DailyReport, and incoming: DailyReport,
                                           freshness: inout ReportSectorFreshness, axis: StressDayAxis, night: ArchivedNight) {
-        guard let nightCarrier = [prior, incoming].first(where: { reading in
+        let nightCarrier = [prior, incoming].first { reading in
             ArchivedNight(reading).map { $0.at == night.at && NightShape($0) == NightShape(night) } ?? false
-        }) else {
-            report.evidence?.zones = .stale
-            freshness.daytimePulseAt = nil
-            return
         }
-        let bounds = nightCarrier.zoneBounds
-        report.zoneBounds = bounds; report.hrMax = nightCarrier.hrMax; report.hrMaxMeasured = nightCarrier.hrMaxMeasured
+        let bounds = nightCarrier?.zoneBounds ?? []
+        report.zoneBounds = bounds
+        if let nightCarrier { report.hrMax = nightCarrier.hrMax; report.hrMaxMeasured = nightCarrier.hrMaxMeasured }
         let protected = [DateSpan(start: night.night.inBed, end: night.night.outOfBed)] + night.naps
         func belongsToNight(_ offset: Int) -> Bool {
             let start = axis.start.addingTimeInterval(Double(offset) * 60)
@@ -564,22 +563,33 @@ public enum History {
             return protected.contains { $0.start < end && start < $0.end }
         }
         let count = Int(axis.end.timeIntervalSince(axis.start) / 60)
-        let readings = [prior, incoming].filter { $0.zoneBounds == bounds && $0.pulseZoneCells?.count == count }
-            .sorted { ($0.sectorFreshness?.daytimePulseAt ?? .distantPast) < ($1.sectorFreshness?.daytimePulseAt ?? .distantPast) }
+        let readings = [prior, incoming].filter { $0.pulseZoneCells?.count == count }
+            .sorted { daytimeReadAt($0) < daytimeReadAt($1) }
         guard let recent = readings.last(where: { reading in
             reading.pulseZoneCells?.enumerated().contains { $0.element > 0 && !belongsToNight($0.offset) } == true
         }), let daytime = recent.pulseZoneCells else {
-            freshness.daytimePulseAt = nightCarrier.sectorFreshness?.daytimePulseAt
-            report.pulseZoneCells = nightCarrier.pulseZoneCells
-            report.zoneMinutesDay = nightCarrier.zoneMinutesDay; report.evidence?.zones = .stale
+            freshness.daytimePulseAt = nil
+            report.pulseZoneCells = nightCarrier?.pulseZoneCells
+            if let nightCarrier { report.zoneMinutesDay = nightCarrier.zoneMinutesDay }
+            report.evidence?.zones = .stale
             return
         }
-        let overnight = nightCarrier.pulseZoneCells?.count == count ? nightCarrier.pulseZoneCells : nil
-        let cells = Data(daytime.enumerated().map { offset, value in belongsToNight(offset) ? overnight?[offset] ?? 0 : value })
+        let overnight = nightCarrier?.pulseZoneCells?.count == count ? nightCarrier?.pulseZoneCells : nil
+        let compatible = !bounds.isEmpty && recent.zoneBounds == bounds
+        let cells = Data(daytime.enumerated().map { offset, value -> UInt8 in
+            if belongsToNight(offset) { return overnight?[offset] ?? 0 }
+            return compatible || value == 0 ? value : 7
+        })
         var totals = [Double](repeating: 0, count: 5)
         for value in cells where value >= 2 && value <= 6 { totals[Int(value) - 2] += 1 }
-        report.zoneMinutesDay = totals; report.pulseZoneCells = cells; report.evidence?.zones = .computed
+        report.zoneMinutesDay = totals; report.pulseZoneCells = cells
+        let classifiedDay = cells.enumerated().contains { $0.element > 0 && $0.element < 7 && !belongsToNight($0.offset) }
+        report.evidence?.zones = classifiedDay ? .computed : .insufficient
         freshness.daytimePulseAt = recent.sectorFreshness?.daytimePulseAt ?? recent.computedAt
+    }
+
+    private static func daytimeReadAt(_ report: DailyReport) -> Date {
+        report.sectorFreshness?.daytimePulseAt ?? report.computedAt ?? .distantPast
     }
 
     private static func reconcileArchive(_ history: [DailyReport], replacing date: Date, previous: [DailyReport],

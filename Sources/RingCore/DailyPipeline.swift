@@ -168,10 +168,8 @@ public enum DailyPipeline {
         let axis = StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier)
         var eveningRevisions = History.eveningRevisions(in: history, successor: day).filter { $0.confirmedAt <= input.now }
         if let revision = confirmedEveningSleep(input, periods: periods, night: night) {
-            let previous = History.visibleEveningRevisions(eveningRevisions, target: revision.eveningDay, visibleAt: input.now).last
-            if previous?.runs != revision.runs || previous?.awakeRuns != revision.awakeRuns {
-                eveningRevisions = History.mergeEveningRevisions(eveningRevisions + [revision])
-            }
+            // Lo stesso esito a un nuovo istante ha precedenza sulle rettifiche intermedie arrivate tardi.
+            eveningRevisions = History.mergeEveningRevisions(eveningRevisions + [revision])
         }
         let effective = History.effectiveSleepObservations(observations, target: axis,
                                                            revisions: History.eveningRevisions(in: history, successor: dayEnd),

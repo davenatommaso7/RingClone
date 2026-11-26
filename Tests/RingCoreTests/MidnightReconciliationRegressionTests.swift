@@ -153,6 +153,34 @@ final class MidnightReconciliationRegressionTests: XCTestCase {
         XCTAssertEqual(old.state(\.alignment), .stale)
     }
 
+    func testReaffirmationWinsOverLateIntermediateWakeRegardlessOfArrivalOrder() throws {
+        let original = awakeHistory(ending: 7), previousDay = testDay(7), day = testDay(8)
+        let evening = day.addingTimeInterval(-1800), duringEvening = day.addingTimeInterval(-900)
+        let t1 = day.addingTimeInterval(86_400), t2 = t1.addingTimeInterval(60), t3 = t1.addingTimeInterval(120)
+        let sleep = [night(day, fromMin: -30, toMin: 240)]
+        let wake = [SleepSegment(start: evening, end: day, stage: .wake), night(day, fromMin: 30, toMin: 270)]
+        let events = [(t1, sleep), (t2, wake), (t3, sleep)]
+        for order in [[0, 2, 1], [0, 1, 2]] {
+            var archive = original
+            for i in order {
+                let (instant, segments) = events[i]
+                let revision = makeReport(day, now: instant, sleep: segments, history: archive)
+                archive = History.upsert(revision, into: archive, calendar: testCal)
+            }
+            archive = try History.decode(History.encode(archive))
+            let current = try XCTUnwrap(archive.first { $0.date == previousDay })
+            XCTAssertEqual(state(current, at: duringEvening)?.asleep, true, "Ordine di arrivo: \(order)")
+            XCTAssertEqual(try XCTUnwrap(current.sri), 100 - 200 * 30.0 / (3 * 1440), accuracy: 1e-9)
+
+            let then = makeReport(previousDay, now: t2, history: archive)
+            XCTAssertEqual(state(then, at: duringEvening)?.asleep, false)
+            XCTAssertEqual(then.sri, 100)
+
+            let replay = makeReport(day, now: t3, sleep: sleep, history: archive)
+            XCTAssertEqual(try History.encode(History.upsert(replay, into: archive, calendar: testCal)), try History.encode(archive))
+        }
+    }
+
     func testEveningUsesActualCivilBoundaryAndRejectsMismatchedTimeZone() throws {
         var rome = Calendar(identifier: .gregorian)
         rome.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Rome"))

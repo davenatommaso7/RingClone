@@ -283,9 +283,8 @@ public enum SleepSources {
             s.filter { $0.reportedStage?.isSleep == true }.map { $0.end.timeIntervalSince($0.start) / 60 }.reduce(0, +)
         }
         let staged = bySource.filter { asleepMin($0.value) > 0 }
-        let available = staged.isEmpty ? bySource.filter { !$0.value.isEmpty } : staged
-        let preferred = available.filter { $0.key.hasPrefix(preferredPrefix) }
-        let pool = preferred.isEmpty ? available : preferred
+        let preferred = staged.filter { $0.key.hasPrefix(preferredPrefix) }
+        let pool = preferred.isEmpty ? staged : preferred
         // a parità di minuti decide il nome: la scelta non dipende dall'ordine del dizionario
         let best = pool.max { a, b in
             let ma = asleepMin(a.value), mb = asleepMin(b.value)

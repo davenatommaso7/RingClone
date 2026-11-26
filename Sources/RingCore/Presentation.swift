@@ -195,6 +195,7 @@ public enum Presentation {
         out.append(Line("Debito di sonno", r.dailySleepMin == nil ? stateLabel(.insufficient) : duration(r.sleepDebtH * 60)))
         let sri = r.sriNeedsProvenance == true ? "Da verificare" : (r.sri == nil ? "servono più notti" : number(r.sri))
         out.append(Line("Regolarità (SRI)", sri))
+        if let notice = regularityProvenanceNotice(r) { out.append(Line("Storico del sonno", notice)) }
         out.append(Line("Costanza degli orari", r.sleepConsistency == nil ? "servono più notti" : number(r.sleepConsistency)))
         return out
     }
@@ -285,6 +286,14 @@ public extension WatchSettings {
 /// Scelta della sorgente del sonno quando in Apple Salute scrivono più app (i loro intervalli si sovrappongono
 /// e non vanno sommati): prima l'Apple Watch, altrimenti la sorgente con più sonno registrato.
 public enum SleepSources {
+    public static func selectForReconciliation(_ byBundle: [String: [SleepSegment]])
+        -> (selected: [SleepSegment], source: SleepSourceKey?) {
+        let selected = pick(byBundle)
+        let sleep = selected.filter { $0.reportedStage?.isSleep == true }
+        guard let source = sleep.first?.source, sleep.allSatisfy({ $0.source == source }) else { return (selected, nil) }
+        return (selected, source)
+    }
+
     public static func pick(_ bySource: [String: [SleepSegment]], preferredPrefix: String = "com.apple.health") -> [SleepSegment] {
         func asleepMin(_ s: [SleepSegment]) -> Double {
             s.filter { $0.reportedStage?.isSleep == true }.map { $0.end.timeIntervalSince($0.start) / 60 }.reduce(0, +)

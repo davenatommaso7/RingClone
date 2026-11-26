@@ -10,8 +10,12 @@ struct DayAssembler: Sendable {
     let hardwareScope: UUID?
 
     enum Failure: Error { case noData }
+    enum Reading: Sendable {
+        case ordinary(DayInput)
+        case isolatedWake(DayInput)
+    }
 
-    func input(for day: Date, calendar: Calendar, now: Date) async throws -> DayInput {
+    func input(for day: Date, calendar: Calendar, now: Date) async throws -> Reading {
         let from = day.addingTimeInterval(-DayInput.lookback)                       // la notte comincia la sera prima
         let dayEnd = calendar.dateInterval(of: .day, for: day)?.end ?? day.addingTimeInterval(86_400)
         let to = min(dayEnd, now)
@@ -39,7 +43,7 @@ struct DayAssembler: Sendable {
         let motion = try archive.readEpochs(from: from, to: to)
 
         var input = DayInput.make(day: day, calendar: calendar, now: now, hr: hr, steps: steps, motion: motion, appleSleep: sleep)
-        input.appleSleepSource = sleep.first?.source
+        input.appleSleepSource = sleepReading.selectedSource
         input.explicitSleepProviders = sleepReading.providers
         input.ibiSeries = (try? await ibiQ) ?? []
         input.hkWorkouts = try await workoutsQ
@@ -66,10 +70,11 @@ struct DayAssembler: Sendable {
             input.appleVO2 = v.value
             input.appleVO2AgeDays = max(to.timeIntervalSince(v.date) / 86_400, 0)
         }
-        guard !hr.isEmpty || !steps.isEmpty || !motion.isEmpty || !sleep.isEmpty || !sleepReading.providers.isEmpty || !input.ibiSeries.isEmpty ||
+        guard !hr.isEmpty || !steps.isEmpty || !motion.isEmpty || !sleep.isEmpty || !input.ibiSeries.isEmpty ||
                   !input.hkWorkouts.isEmpty || input.hkActiveKcal != nil || input.hkBasalKcal != nil || input.daylightMin != nil else {
+            if !sleepReading.providers.isEmpty { return .isolatedWake(input) }
             throw Failure.noData
         }
-        return input
+        return .ordinary(input)
     }
 }

@@ -105,6 +105,20 @@ public struct DayInput: Sendable {
 /// Dal giorno grezzo al report. Funzione pura: stessi ingressi, stesso risultato; nessuna lettura dell'orologio
 /// di sistema, nessuno stato nascosto. `history` = report già calcolati (servono solo quelli precedenti a `day`).
 public enum DailyPipeline {
+    /// Aggiorna solo la riconciliazione. Il giorno del risveglio conserva il suo report ordinario.
+    public static func applyingIsolatedWake(_ input: DayInput, to history: [DailyReport]) -> [DailyReport] {
+        guard input.now >= input.day, let evening = previousEvening(for: input) else { return history }
+        let axis = StressDayAxis(start: evening.start, end: evening.end, timeZoneIdentifier: input.calendar.timeZone.identifier)
+        let targets = history.filter { $0.date == axis.start && $0.stressAxis == axis }
+        guard var target = History.onePerDay(targets, calendar: input.calendar).first,
+              target.originalSleepObservations != nil else { return history }
+        let wakes = nativeEveningWake(input, evening: evening)
+        guard !wakes.isEmpty else { return history }
+        let revision = EveningSleepRevision(eveningDay: axis, confirmedAt: input.now, runs: [], awakeRuns: [], nativeWakes: wakes)
+        target.eveningSleepRevisions = (target.eveningSleepRevisions ?? []) + [revision]
+        return History.upsert(target, into: history, calendar: input.calendar)
+    }
+
     public static func run(_ input: DayInput, profile: UserProfile, history: [DailyReport],
                            staging: StagingModel = .standard) -> DailyReport {
         let cal = input.calendar, day = input.day, dayEnd = input.dayEnd
@@ -169,7 +183,7 @@ public enum DailyPipeline {
         let observations = sleepObservations(e, periods: periods, night: night, day: day..<dayEnd)
         let axis = StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier)
         var eveningRevisions = History.eveningRevisions(in: history, successor: day).filter { $0.confirmedAt <= input.now }
-        if let revision = eveningRevision(input, periods: periods, night: night, known: eveningRevisions) {
+        if let revision = eveningRevision(input, periods: periods, night: night) {
             // Lo stesso esito a un nuovo istante ha precedenza sulle rettifiche intermedie arrivate tardi.
             eveningRevisions = History.mergeEveningRevisions(eveningRevisions + [revision])
         }
@@ -348,19 +362,20 @@ public enum DailyPipeline {
             sriNeedsProvenance: regularity.needsProvenance ? true : nil)
     }
 
-    private static func eveningRevision(_ input: DayInput, periods: SleepPeriods, night: NightReport?,
-                                        known: [EveningSleepRevision]) -> EveningSleepRevision? {
-        guard let day = input.calendar.dateInterval(of: .day, for: input.day.addingTimeInterval(-1)), day.end == input.day else { return nil }
+    private static func eveningRevision(_ input: DayInput, periods: SleepPeriods, night: NightReport?) -> EveningSleepRevision? {
+        guard let day = previousEvening(for: input) else { return nil }
         let axis = StressDayAxis(start: day.start, end: day.end, timeZoneIdentifier: input.calendar.timeZone.identifier)
         var revision = confirmedEveningSleep(input, periods: periods, night: night, eveningDay: axis)
             ?? EveningSleepRevision(eveningDay: axis, confirmedAt: input.now, runs: [], awakeRuns: [])
-        let earlierIDs = Set(known.filter { $0.confirmedAt < input.now }.flatMap { $0.nativeWakes ?? [] }.map(\.sampleID))
-        let sameInstantIDs = Set(known.filter { $0.confirmedAt == input.now }.flatMap { $0.nativeWakes ?? [] }.map(\.sampleID))
-        let wakes = nativeEveningWake(input, evening: day).filter {
-            !earlierIDs.contains($0.sampleID) || sameInstantIDs.contains($0.sampleID)
-        }
+        let wakes = nativeEveningWake(input, evening: day)
         revision.nativeWakes = wakes.isEmpty ? nil : wakes
         return revision.runs.isEmpty && revision.awakeRuns.isEmpty && wakes.isEmpty ? nil : revision
+    }
+
+    private static func previousEvening(for input: DayInput) -> DateInterval? {
+        guard let day = input.calendar.dateInterval(of: .day, for: input.day.addingTimeInterval(-1)),
+              day.end == input.day else { return nil }
+        return day
     }
 
     private static func confirmedEveningSleep(_ input: DayInput, periods: SleepPeriods,
@@ -390,11 +405,29 @@ public enum DailyPipeline {
             return DateSpan(start: start, end: min(end, eveningDay.end))
         }
         let source = input.appleSleepSource.flatMap { selected -> SleepSourceKey? in
-            guard periods.source == "apple", input.appleSleep.allSatisfy({ $0.source == nil || $0.source == selected }) else { return nil }
+            guard periods.source == "apple", input.appleSleep.filter({ $0.reportedStage?.isSleep == true })
+                .allSatisfy({ $0.source == nil || $0.source == selected }) else { return nil }
             return selected
         }
+        let coherentRuns = source.map { key in
+            let nativeAwake = input.explicitSleepProviders.filter { $0.source == key }.flatMap(\.samples)
+                .map(\.segment).filter { $0.reportedStage == .wake && $0.start < $0.end }
+            guard !nativeAwake.isEmpty else { return runs }
+            return runs.flatMap { run in
+                let count = Int((run.end.timeIntervalSince(run.start) / RingConst.epoch).rounded(.down))
+                let valid = (0..<count).map { index in
+                    let start = run.start.addingTimeInterval(Double(index) * RingConst.epoch)
+                    let end = start.addingTimeInterval(RingConst.epoch)
+                    return !nativeAwake.contains { $0.start < end && start < $0.end }
+                }
+                return Stats.runs(valid).map { range in
+                    DateSpan(start: run.start.addingTimeInterval(Double(range.lowerBound) * RingConst.epoch),
+                             end: run.start.addingTimeInterval(Double(range.upperBound) * RingConst.epoch))
+                }
+            }
+        } ?? runs
         // Con provenienza verificata la veglia arriva dal canale UUID, anche se la notte è completa.
-        return EveningSleepRevision(eveningDay: eveningDay, confirmedAt: input.now, runs: runs,
+        return EveningSleepRevision(eveningDay: eveningDay, confirmedAt: input.now, runs: coherentRuns,
                                      awakeRuns: source == nil ? awakeRuns : [], source: source)
     }
 

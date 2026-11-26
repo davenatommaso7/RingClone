@@ -110,12 +110,18 @@ final class Store: ObservableObject {
         for k in stride(from: days - 1, through: 0, by: -1) {
             guard let day = cal.date(byAdding: .day, value: -k, to: today) else { continue }
             do {
-                let input = try await assembler.input(for: day, calendar: cal, now: now)
+                let reading = try await assembler.input(for: day, calendar: cal, now: now)
+                if k == 0, case .isolatedWake = reading { todayNotUpdated = true }
                 let before = history
-                let report = await Task.detached(priority: .utility) {
-                    DailyPipeline.run(input, profile: profile, history: before)
+                history = await Task.detached(priority: .utility) {
+                    switch reading {
+                    case .ordinary(let input):
+                        let report = DailyPipeline.run(input, profile: profile, history: before)
+                        return History.upsert(report, into: before, calendar: cal)
+                    case .isolatedWake(let input):
+                        return DailyPipeline.applyingIsolatedWake(input, to: before)
+                    }
                 }.value
-                history = History.upsert(report, into: history, calendar: cal)
             } catch DayAssembler.Failure.noData {
                 if k == 0 { todayNotUpdated = true }
                 continue // Una rilettura vuota non identifica una cancellazione.

@@ -97,6 +97,16 @@ public struct Baselines: Sendable {
 }
 
 public enum History {
+    private struct NativeWakeIdentity: Hashable {
+        let evening: StressDayAxis
+        let source: SleepSourceKey
+        let id: UUID
+
+        init(_ wake: EarlyWakeObservation, evening: StressDayAxis) {
+            self.evening = evening; source = wake.source; id = wake.sampleID
+        }
+    }
+
     /// Giorno civile nel calendario del report. Vince la revisione acquisita più tardi.
     /// In assenza di precedenza temporale, l'ordine dei byte canonici rompe il pareggio.
     static func onePerDay(_ history: [DailyReport], calendar: Calendar) -> [DailyReport] {
@@ -104,9 +114,7 @@ public enum History {
         var revisions: [Date: [EveningSleepRevision]] = [:]
         for report in history {
             let day = calendar.startOfDay(for: report.date)
-            if let entries = report.eveningSleepRevisions {
-                revisions[day, default: []] += entries.filter { $0.eveningDay.end == report.date }
-            }
+            if report.eveningSleepRevisions != nil { revisions[day, default: []] += attachedEveningRevisions(report) }
             if let old = days[day] {
                 let oldTime = old.computedAt ?? .distantPast, newTime = report.computedAt ?? .distantPast
                 if oldTime > newTime { continue }
@@ -119,12 +127,50 @@ public enum History {
             }
             days[day] = report
         }
+        let firstWake = firstWakeTimes(revisions.values.flatMap { $0 })
+        let normalized = revisions.mapValues { $0.compactMap { keepingFirstWake(in: $0, firstWake: firstWake) } }
+        let storedWithPredecessor = Set(normalized.flatMap { day, entries in
+            entries.filter { $0.eveningDay.start == day && !$0.hasClassification }
+        })
         return days.map { day, candidate in
             var report = candidate
-            let entries = mergeEveningRevisions(revisions[day] ?? []).filter { $0.eveningDay.end == report.date }
+            let entries = mergeEveningRevisions((normalized[day] ?? []).filter { revision in
+                isAttached(revision, to: candidate.date) &&
+                    (revision.eveningDay.start == candidate.date || !storedWithPredecessor.contains(revision))
+            })
             report.eveningSleepRevisions = entries.isEmpty ? nil : entries
             return report
         }.sorted { $0.date < $1.date }
+    }
+
+    private static func isAttached(_ revision: EveningSleepRevision, to date: Date) -> Bool {
+        revision.confirmedAt >= revision.eveningDay.end &&
+            (revision.eveningDay.end == date || (revision.eveningDay.start == date && !revision.hasClassification))
+    }
+
+    private static func attachedEveningRevisions(_ report: DailyReport) -> [EveningSleepRevision] {
+        (report.eveningSleepRevisions ?? []).filter { isAttached($0, to: report.date) }
+    }
+
+    private static func firstWakeTimes(_ revisions: [EveningSleepRevision]) -> [NativeWakeIdentity: Date] {
+        var result: [NativeWakeIdentity: Date] = [:]
+        for revision in revisions {
+            for wake in revision.nativeWakes ?? [] {
+                let identity = NativeWakeIdentity(wake, evening: revision.eveningDay)
+                result[identity] = min(result[identity] ?? revision.confirmedAt, revision.confirmedAt)
+            }
+        }
+        return result
+    }
+
+    private static func keepingFirstWake(in revision: EveningSleepRevision,
+                                         firstWake: [NativeWakeIdentity: Date]) -> EveningSleepRevision? {
+        guard let wakes = revision.nativeWakes else { return revision }
+        let earliest = wakes.filter { firstWake[NativeWakeIdentity($0, evening: revision.eveningDay)] == revision.confirmedAt }
+        if earliest.isEmpty && !revision.hasClassification { return nil }
+        var normalized = revision
+        normalized.nativeWakes = earliest.isEmpty ? nil : earliest
+        return normalized
     }
 
     /// La rettifica dei valori derivati non cambia l'identità della revisione del report.
@@ -142,7 +188,9 @@ public enum History {
     }
 
     static func mergeEveningRevisions(_ revisions: [EveningSleepRevision]) -> [EveningSleepRevision] {
-        Set(revisions).sorted { a, b in
+        let firstWake = firstWakeTimes(revisions)
+        let normalized = revisions.compactMap { keepingFirstWake(in: $0, firstWake: firstWake) }
+        return Set(normalized).sorted { a, b in
             if a.confirmedAt != b.confirmedAt { return a.confirmedAt < b.confirmedAt }
             let scopeA = (a.eveningDay.start, a.eveningDay.end, a.eveningDay.timeZoneIdentifier)
             let scopeB = (b.eveningDay.start, b.eveningDay.end, b.eveningDay.timeZoneIdentifier)
@@ -159,13 +207,12 @@ public enum History {
     }
 
     static func eveningRevisions(in history: [DailyReport], successor: Date) -> [EveningSleepRevision] {
-        mergeEveningRevisions(history.filter { $0.date == successor }.flatMap { $0.eveningSleepRevisions ?? [] }
-            .filter { $0.eveningDay.end == successor && $0.confirmedAt >= successor })
+        mergeEveningRevisions(history.flatMap(attachedEveningRevisions).filter { $0.eveningDay.end == successor })
     }
 
     static func visibleEveningRevisions(_ revisions: [EveningSleepRevision], target: StressDayAxis,
                                         visibleAt: Date) -> [EveningSleepRevision] {
-        let eligible = Set(revisions.filter { $0.eveningDay == target && $0.confirmedAt <= visibleAt })
+        let eligible = mergeEveningRevisions(revisions.filter { $0.eveningDay == target && $0.confirmedAt <= visibleAt })
         let byTime = Dictionary(grouping: eligible, by: \.confirmedAt)
         // Una collisione allo stesso istante non è una conferma di quale versione sia corretta.
         return byTime.keys.sorted().compactMap { time in
@@ -207,7 +254,7 @@ public enum History {
             let source: SleepSourceKey?
         }
         var sleep: [OwnedSpan] = []
-        var observedWake = Set<UUID>()
+        var observedWake = Set<NativeWakeIdentity>()
         func subtract(_ cut: DateSpan, matching: (SleepSourceKey?) -> Bool) {
             sleep = sleep.flatMap { item -> [OwnedSpan] in
                 let span = item.span
@@ -228,7 +275,7 @@ public enum History {
                 sleep.append(OwnedSpan(span: run, source: revision.source))
             }
             for awake in revision.awakeRuns { subtract(awake) { $0 == revision.source } }
-            for wake in revision.nativeWakes ?? [] where observedWake.insert(wake.sampleID).inserted {
+            for wake in revision.nativeWakes ?? [] where observedWake.insert(NativeWakeIdentity(wake, evening: revision.eveningDay)).inserted {
                 for run in wake.runs { subtract(run) { $0 == wake.source } }
             }
         }
@@ -249,9 +296,7 @@ public enum History {
         -> (score: Double?, needsProvenance: Bool) {
         let from = calendar.date(byAdding: .day, value: -7, to: day.start) ?? day.start.addingTimeInterval(-7 * 86_400)
         let relevant = history.filter { $0.date >= from && $0.date <= day.end }
-        let revisions = relevant.flatMap { report in
-            (report.eveningSleepRevisions ?? []).filter { $0.eveningDay.end == report.date && $0.confirmedAt >= report.date }
-        } + incomingRevisions
+        let revisions = relevant.flatMap(attachedEveningRevisions) + incomingRevisions
         let prior = onePerDay(relevant.filter { $0.date < day.start && ($0.computedAt ?? .distantPast) <= visibleAt }, calendar: calendar)
         var days: [Date: [SleepObservation]] = [:]
         var conflicts: [Date: [DateSpan]] = [:]
@@ -279,7 +324,8 @@ public enum History {
         let wake = original.filter { !$0.asleep && $0.contextualWake == nil }
         guard !wake.isEmpty else { return [] }
         let active = visibleEveningRevisions(revisions, target: target, visibleAt: visibleAt)
-        let sleep = active.isEmpty ? legacySleepRuns(for: target, in: history, visibleAt: visibleAt) : eveningSleepRuns(after: active)
+        let sleep = active.contains(where: \.hasClassification) ? eveningSleepRuns(after: active)
+            : legacySleepRuns(for: target, in: history, visibleAt: visibleAt)
         return wake.flatMap { observation in
             sleep.compactMap { run -> DateSpan? in
                 let start = max(observation.span.start, run.start, target.start)
@@ -294,7 +340,7 @@ public enum History {
         guard let calendar = archivedCalendar(for: target) else { return [] }
         let next = history.filter { $0.date == target.end && ($0.computedAt ?? .distantPast) <= visibleAt }
         guard let source = onePerDay(next, calendar: calendar).first, source.regularityAlignmentInputs == nil,
-              source.eveningSleepRevisions == nil, let axis = source.stressAxis, axis.start == target.end,
+              let axis = source.stressAxis, axis.start == target.end,
               axis.timeZoneIdentifier == target.timeZoneIdentifier, archivedCalendar(for: axis) != nil,
               let night = source.night, night.finalWake >= axis.start, night.finalWake < axis.end else { return [] }
         return night.sleepRuns.filter { $0.start >= night.sleepOnset && $0.end <= night.finalWake && $0.start < $0.end }
@@ -360,7 +406,8 @@ public enum History {
 
     private static func reconcileArchive(_ history: [DailyReport], replacing date: Date, previous: [DailyReport],
                                          calendar: Calendar) -> [DailyReport] {
-        guard let visibleAt = history.compactMap(\.computedAt).max() else { return history }
+        let timestamps = history.compactMap(\.computedAt) + history.flatMap(attachedEveningRevisions).map(\.confirmedAt)
+        guard let visibleAt = timestamps.max() else { return history }
         var targetDays = [date]
         if let before = calendar.dateInterval(of: .day, for: date.addingTimeInterval(-1)), before.end == date {
             targetDays.append(before.start)
@@ -382,7 +429,8 @@ public enum History {
             let conflictsAfter = ambiguousWake(in: original, hasProvenance: updated.regularityAlignmentInputs != nil,
                                                target: axis, revisions: newRevisions, history: history, visibleAt: visibleAt)
             let projectionChanged = before != after && (before != observedBefore || after != original)
-            guard projectionChanged || conflictsBefore != conflictsAfter,
+            let supersededTime = oldRevisions != newRevisions && oldRevisions.contains { $0.confirmedAt > visibleAt }
+            guard projectionChanged || conflictsBefore != conflictsAfter || supersededTime,
                   let limit = calendar.date(byAdding: .day, value: 7, to: day) else { continue }
             affected.append(day...limit)
         }
@@ -398,6 +446,7 @@ public enum History {
             let sri = assessment.score
             let needsProvenance = assessment.needsProvenance ? true : nil
             guard sri != candidate.sri || observations != candidate.sleepObservations ||
+                    (candidate.sriReconciledAt ?? .distantPast) > visibleAt ||
                     needsProvenance != candidate.sriNeedsProvenance else { return candidate }
             var revised = candidate
             revised.sleepObservations = observations

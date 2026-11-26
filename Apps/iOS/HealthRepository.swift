@@ -90,7 +90,7 @@ final class HealthRepository: @unchecked Sendable {
 
     /// Intervalli di sonno di UNA sola sorgente (Apple Watch se c'è), mai mescolati tra app diverse
     func sleep(from a: Date, to b: Date, hardwareScope: UUID?) async throws
-        -> (selected: [SleepSegment], providers: [SleepProviderEvidence]) {
+        -> (selected: [SleepSegment], selectedSource: SleepSourceKey?, providers: [SleepProviderEvidence]) {
         let raw = try await samples(HKCategoryType(.sleepAnalysis), from: a, to: b, as: HKCategorySample.self)
         var bySource: [String: [SleepSegment]] = [:]
         var trusted: [SleepSourceKey: [SleepSourceSample]] = [:]
@@ -109,14 +109,14 @@ final class HealthRepository: @unchecked Sendable {
             let source = Self.sleepSource(bundle: bundle, device: s.device?.localIdentifier, hardwareScope: hardwareScope)
             let segment = stage.map { SleepSegment(start: s.startDate, end: s.endDate, reportedStage: $0, source: source) }
                 ?? SleepSegment(start: s.startDate, end: s.endDate, stage: nil, source: source)
-            let key = source.map { bundle + "/" + $0.fingerprint.base64EncodedString() } ?? bundle
-            bySource[key, default: []].append(segment)
+            bySource[bundle, default: []].append(segment)
             if let source { trusted[source, default: []].append(SleepSourceSample(id: s.uuid, segment: segment)) }
         }
         let providers = trusted.compactMap { source, samples in
             samples.contains(where: { $0.segment.reportedStage == .wake }) ? SleepProviderEvidence(source: source, samples: samples) : nil
         }
-        return (SleepSources.pick(bySource), providers)
+        let choice = SleepSources.selectForReconciliation(bySource)
+        return (choice.selected, choice.source, providers)
     }
 
     private static func sleepSource(bundle: String, device: String?, hardwareScope: UUID?) -> SleepSourceKey? {

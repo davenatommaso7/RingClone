@@ -31,6 +31,12 @@ final class MidnightProvenanceRegressionTests: XCTestCase {
         [SleepSegment(start: at(-30), end: at(240), stage: .light, source: key)]
     }
 
+    private func wakeInput(_ provider: SleepProviderEvidence, now: Date) -> DayInput {
+        var input = DayInput.make(day: successor, calendar: testCal, now: now, hr: [], steps: [], motion: [])
+        input.explicitSleepProviders = [provider]
+        return input
+    }
+
     private func preceding(_ history: [DailyReport]) throws -> DailyReport {
         try XCTUnwrap(history.first { $0.date == previous })
     }
@@ -67,6 +73,7 @@ final class MidnightProvenanceRegressionTests: XCTestCase {
         XCTAssertEqual(asleep(marked, at: at(-15)), false)
         XCTAssertNotNil(Presentation.regularityProvenanceNotice(marked))
         XCTAssertEqual(Presentation.sleepLines(marked).first { $0.name == "Regolarità (SRI)" }?.value, "Da verificare")
+        XCTAssertTrue(Presentation.sleepLines(marked).contains { $0.value.contains("rilettura dei dati di sonno e veglia") })
         XCTAssertEqual(Presentation.circadianLines(marked).first?.value, "Da verificare")
         XCTAssertEqual(marked.state(\.alignment), .stale)
         XCTAssertNotNil(Presentation.regularityProvenanceNotice(try XCTUnwrap(loaded.last)))
@@ -79,6 +86,15 @@ final class MidnightProvenanceRegressionTests: XCTestCase {
         let knownLater = report(successor, stages: [SleepSegment(start: at(30), end: at(270), stage: .light)], history: days)
         let noOverlap = try History.decode(History.encode(Array(old.dropLast()) + [legacy(knownLater)]))
         XCTAssertNil(Presentation.regularityProvenanceNotice(try preceding(noOverlap)))
+
+        let key = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 5, count: 32)))
+        let isolated = SleepProviderEvidence(source: key, samples: [
+            SleepSourceSample(id: UUID(), segment: SleepSegment(start: at(-30), end: at(0), stage: .wake))
+        ])
+        let stillAmbiguous = DailyPipeline.applyingIsolatedWake(wakeInput(isolated, now: at(1450)), to: loaded)
+        let again = try History.decode(History.encode(stillAmbiguous))
+        XCTAssertNotNil(Presentation.regularityProvenanceNotice(try preceding(again)))
+        XCTAssertNotNil(Presentation.regularityProvenanceNotice(try XCTUnwrap(again.last)))
 
         let now = at(1500)
         let reread = report(previous, now: now, history: loaded)
@@ -157,5 +173,70 @@ final class MidnightProvenanceRegressionTests: XCTestCase {
             h = History.upsert(polled, into: h, calendar: testCal)
             XCTAssertEqual(asleep(try preceding(h), at: at(-10)), true, "La rilettura non riapplica il campione.")
         }
+    }
+
+    func testOrdinaryBundleSelectionRetainsMixedAndUnattributedSegments() throws {
+        let a = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 1, count: 32)))
+        let b = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 2, count: 32)))
+        let bundle = "com.apple.health.synthetic"
+        let bed = SleepSegment(start: at(-50), end: at(210), stage: nil)
+        let one = SleepSegment(start: at(-30), end: at(30), stage: .light, source: a)
+        let mixed = SleepSegment(start: at(30), end: at(90), stage: .deep, source: b)
+        let unknown = SleepSegment(start: at(90), end: at(150), reportedStage: .asleepUnspecified)
+        let otherApple = SleepSegment(start: at(-30), end: at(120), stage: .rem, source: b)
+        let phone = SleepSegment(start: at(-30), end: at(400), stage: .light)
+        let byBundle = [bundle: [unknown, mixed, one, bed], "com.apple.health.other": [otherApple], "synthetic.phone": [phone]]
+        let selected = SleepSources.selectForReconciliation(byBundle)
+        XCTAssertEqual(selected.selected.map(\.start), [bed.start, one.start, mixed.start, unknown.start])
+        XCTAssertEqual(selected.selected.map(\.reportedStage), [nil, .light, .deep, .asleepUnspecified])
+        XCTAssertNil(selected.source)
+        XCTAssertEqual(SleepSources.selectForReconciliation([bundle: [bed, one]]).source, a)
+        XCTAssertNil(SleepSources.selectForReconciliation([bundle: [one, unknown]]).source)
+    }
+
+    func testIsolatedWakePreservesNightAndCanArriveBeforeItsReport() throws {
+        let key = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 6, count: 32)))
+        let days = history()
+        let original = report(successor, now: at(1440), stages: night(key), source: key, history: days)
+        let archived = History.upsert(original, into: days, calendar: testCal)
+        let wake = SleepSourceSample(id: UUID(), segment: SleepSegment(start: at(-15), end: at(0), stage: .wake))
+        let provider = SleepProviderEvidence(source: key, samples: [wake])
+        let input = wakeInput(provider, now: at(1450))
+        let late = DailyPipeline.applyingIsolatedWake(input, to: archived)
+        let originalFirst = try XCTUnwrap(late.last)
+        XCTAssertEqual(late.count, archived.count)
+        XCTAssertEqual(originalFirst.computedAt, original.computedAt)
+        XCTAssertEqual(originalFirst.night?.tstMin, 270)
+        XCTAssertEqual(originalFirst.dailySleepMin, 270)
+        XCTAssertEqual(originalFirst.sleepDebtH, 3.5, accuracy: 1e-9)
+        XCTAssertEqual(asleep(try preceding(late), at: at(-20)), true)
+        XCTAssertEqual(asleep(try preceding(late), at: at(-10)), false)
+        let early = DailyPipeline.applyingIsolatedWake(input, to: days)
+        XCTAssertEqual(early.count, days.count)
+        XCTAssertNil(early.first { $0.date == successor })
+        let outOfOrder = History.upsert(original, into: early, calendar: testCal)
+        XCTAssertEqual(try History.encode(late), try History.encode(outOfOrder))
+        let reopened = try History.decode(History.encode(late))
+        XCTAssertEqual(try History.encode(DailyPipeline.applyingIsolatedWake(input, to: reopened)), try History.encode(late))
+    }
+
+    func testWakeBackfillKeepsEarliestEventAndSameSnapshotCannotReaffirmConflictingSleep() throws {
+        let key = try XCTUnwrap(SleepSourceKey(fingerprint: Data(repeating: 7, count: 32)))
+        let days = history()
+        let original = report(successor, now: at(1440), stages: night(key), source: key, history: days)
+        let archived = History.upsert(original, into: days, calendar: testCal)
+        let wake = SleepSourceSample(id: UUID(), segment: SleepSegment(start: at(-15), end: at(0), stage: .wake))
+        let provider = SleepProviderEvidence(source: key, samples: [wake])
+        let earlier = wakeInput(provider, now: at(1450)), later = wakeInput(provider, now: at(1470))
+        let first = DailyPipeline.applyingIsolatedWake(earlier, to: archived)
+        let chronological = DailyPipeline.applyingIsolatedWake(later, to: first)
+        let backwards = DailyPipeline.applyingIsolatedWake(earlier, to: DailyPipeline.applyingIsolatedWake(later, to: archived))
+        XCTAssertEqual(try History.encode(chronological), try History.encode(backwards))
+        let revisions = History.eveningRevisions(in: backwards, successor: successor)
+        XCTAssertEqual(revisions.filter { $0.nativeWakes?.contains(where: { $0.sampleID == wake.id }) == true }.map(\.confirmedAt), [earlier.now])
+        let both = report(successor, now: at(1480), stages: night(key), source: key, providers: [provider], history: backwards)
+        let unchanged = History.upsert(both, into: backwards, calendar: testCal)
+        XCTAssertEqual(asleep(try preceding(unchanged), at: at(-20)), true)
+        XCTAssertEqual(asleep(try preceding(unchanged), at: at(-10)), false)
     }
 }

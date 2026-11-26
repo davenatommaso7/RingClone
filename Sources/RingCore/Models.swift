@@ -198,6 +198,7 @@ struct EveningSleepRevision: Codable, Sendable, Hashable {
     let awakeRuns: [DateSpan]
     var source: SleepSourceKey? = nil
     var nativeWakes: [EarlyWakeObservation]? = nil
+    var hasClassification: Bool { !runs.isEmpty || !awakeRuns.isEmpty }
 }
 
 struct EarlyWakeObservation: Codable, Sendable, Hashable {

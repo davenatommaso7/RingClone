@@ -498,7 +498,8 @@ public enum History {
             let observed = usePrior ? prior[keyPath: value] : incoming[keyPath: value]
             report[keyPath: value] = conflict ? .nan : observed
             freshness[keyPath: time] = usePrior ? older : newer
-            report.evidence?[keyPath: state] = report[keyPath: value].isFinite ? .observed : .stale
+            let energyState: DailyMetricState = report[keyPath: value].isFinite ? .observed : .stale
+            report.evidence?[keyPath: state] = energyState
         }
         if let active = freshness.activeEnergyAt, let total = freshness.totalEnergyAt, active > total {
             report.evidence?.energyTotal = .stale

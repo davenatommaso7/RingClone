@@ -165,9 +165,19 @@ public enum DailyPipeline {
         let dailySleep = night.map { $0.tstMin + napsMin }
         let debt = SleepMetrics.sleepDebtH(b.previousDebtDays.map { $0.sleepMin } + [dailySleep], needH: profile.sleepNeedH)
         let observations = sleepObservations(e, periods: periods, night: night, day: day..<dayEnd)
-        var observedDays = Dictionary(uniqueKeysWithValues: b.regularityDays.map { ($0.date, $0.sleepObservations ?? []) })
-        observedDays[day] = observations
-        let sri = SleepMetrics.sri(observationsByDay: observedDays, calendar: cal)
+        let axis = StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier)
+        var eveningRevisions = History.eveningRevisions(in: history, successor: day).filter { $0.confirmedAt <= input.now }
+        if let revision = confirmedEveningSleep(input, periods: periods, night: night) {
+            let previous = History.latestEveningRevision(eveningRevisions, target: revision.eveningDay, visibleAt: input.now)
+            if previous?.runs != revision.runs {
+                eveningRevisions = History.mergeEveningRevisions(eveningRevisions + [revision])
+            }
+        }
+        let effective = History.effectiveSleepObservations(observations, target: axis,
+                                                           revisions: History.eveningRevisions(in: history, successor: dayEnd),
+                                                           visibleAt: input.now)
+        let sri = History.reconciledSRI(for: axis, observations: observations, history: history, calendar: cal,
+                                        visibleAt: input.now, incomingRevisions: eveningRevisions)
 
         // ───────── 2. Giorno di calendario al minuto ─────────
         let t0 = e.first?.start ?? day
@@ -292,9 +302,8 @@ public enum DailyPipeline {
         let tMin = tMins.isEmpty ? (night?.wakeH ?? b.wakeCenter).map { Stats.wrap24($0 - 2) } : Stats.circularMeanHours(tMins)
         let daylight = input.daylightMin.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
         let midpointReference = jet?.msfSc ?? b.midpointCenter
-        let alignmentKnown = (night != nil && midpointReference != nil) || sri != nil || daylight != nil || jet != nil
-        let alignment = alignmentKnown ? Circadian.alignment(lastMidH: night?.midpointH, referenceMidH: midpointReference, sri: sri,
-                                                             daylightMin: daylight, sjlH: jet?.sjlSc) : .nan
+        let alignmentInputs = RegularityAlignmentInputs(referenceMidH: midpointReference, daylightMin: daylight)
+        let alignment = alignmentInputs.score(midpoint: night?.midpointH, sri: sri, socialJetlag: jet?.sjlSc)
         let windows = tMin.map { Circadian.windows(tMinH: $0, wakeH: wakeRef, bedH: bedRef) } ?? []
 
         // ───────── 8. Fitness ─────────
@@ -313,7 +322,7 @@ public enum DailyPipeline {
             energyActive: activeEnergy, energyTotal: totalEnergy, trimp: loadKnown ? .computed : .insufficient,
             movement: activityKnown || !workouts.isEmpty ? .estimated : .insufficient,
             stress: valid.isEmpty ? .insufficient : .estimated, rhythm: rhythm != nil ? .estimated : .insufficient,
-            recovery: recoveryState, alignment: alignmentKnown ? .estimated : .insufficient,
+            recovery: recoveryState, alignment: alignment != nil ? .estimated : .insufficient,
             tempMinimum: !tMins.isEmpty ? .computed : (tMin != nil ? .estimated : .unavailable),
             fitness: fit?.state ?? .insufficient, baselineReady: baselineReady)
 
@@ -327,12 +336,43 @@ public enum DailyPipeline {
             stressTimeline: timeline, stressAvg: valid.isEmpty ? nil : Stats.mean(valid), stressRhythm: rhythm ?? .nan,
             recovery: rec.score, recoveryLabel: recoveryState == .calibrating ? "In calibrazione" : rec.label,
             recoveryParts: rec.parts, flags: rec.flags,
-            circadianAlignment: alignment, socialJetlagH: jet?.sjl, socialJetlagScH: jet?.sjlSc, chronotypeMSFsc: jet?.msfSc,
+            circadianAlignment: alignment ?? .nan, socialJetlagH: jet?.sjl, socialJetlagScH: jet?.sjlSc, chronotypeMSFsc: jet?.msfSc,
             tempMinH: tMin ?? .nan, windows: windows,
             vo2max: fit?.value ?? .nan, vo2Source: fit?.source ?? "Dati insufficienti", cardioAgeRaw: ageRaw ?? .nan,
             cardioAge: ageRaw.map { Fitness.smooth(previous: b.previousCardioAge, raw: $0) } ?? .nan,
-            baselineNights: b.nights, evidence: evidence, computedAt: input.now, sleepObservations: observations,
-            stressAxis: StressDayAxis(start: day, end: dayEnd, timeZoneIdentifier: cal.timeZone.identifier))
+            baselineNights: b.nights, evidence: evidence, computedAt: input.now, sleepObservations: effective,
+            sleepObservationsBeforeReconciliation: effective == observations ? nil : observations, stressAxis: axis,
+            eveningSleepRevisions: eveningRevisions.isEmpty ? nil : eveningRevisions,
+            regularityAlignmentInputs: alignmentInputs, sriReconciledAt: effective == observations ? nil : input.now)
+    }
+
+    private static func confirmedEveningSleep(_ input: DayInput, periods: SleepPeriods,
+                                               night: NightReport?) -> EveningSleepRevision? {
+        guard let night, night.finalWake >= input.day, night.finalWake < input.dayEnd,
+              night.outOfBed <= input.now,
+              let previous = input.calendar.dateInterval(of: .day, for: input.day.addingTimeInterval(-1)),
+              previous.end == input.day else { return nil }
+        let end = min(input.dayEnd, input.now)
+        let observedRise = night.bedTimingOrigin == .inBedObservation && night.outOfBed > night.finalWake
+        let observedAfter = input.epochs.indices.contains { i in
+            let epoch = input.epochs[i]
+            guard epoch.start >= night.finalWake, epoch.start.addingTimeInterval(RingConst.epoch) <= end else { return false }
+            if periods.appleStages[i] == .wake { return true }
+            return !periods.appleContext[i] && !periods.naps.contains { $0.contains(i) } && hasContextSignal(epoch)
+        }
+        // Una notte vicina alla fine dei dati non equivale a una notte conclusa.
+        guard observedRise || observedAfter else { return nil }
+        let runs = night.sleepRuns.compactMap { span -> DateSpan? in
+            let start = max(span.start, previous.start), end = min(span.end, previous.end)
+            return start < end ? DateSpan(start: start, end: end) : nil
+        }
+        return EveningSleepRevision(eveningDay: StressDayAxis(start: previous.start, end: previous.end,
+                                                              timeZoneIdentifier: input.calendar.timeZone.identifier),
+                                    confirmedAt: input.now, runs: runs)
+    }
+
+    private static func hasContextSignal(_ epoch: Epoch) -> Bool {
+        epoch.observedHR != nil || epoch.observedMotion != nil || (epoch.hasSteps && epoch.steps > 0)
     }
 
     private static func sleepObservations(_ epochs: [Epoch], periods: SleepPeriods, night: NightReport?,
@@ -353,22 +393,22 @@ public enum DailyPipeline {
                 else if stage.isSleep, epochs[i].start >= night.sleepOnset { estimated[i] = true }
             }
         }
-        let states = epochs.indices.map { i -> Bool? in
+        enum State { case asleep, awake, contextualWake }
+        let states = epochs.indices.map { i -> State? in
             let epoch = epochs[i]
             guard day.contains(epoch.start) else { return nil }
-            if let stage = periods.appleStages[i] { return stage == .unknown ? nil : stage.isSleep }
+            if let stage = periods.appleStages[i] { return stage == .unknown ? nil : (stage.isSleep ? .asleep : .awake) }
             if periods.appleContext[i] { return nil }
-            if let state = estimated[i] { return state }
+            if let state = estimated[i] { return state ? .asleep : .awake }
             // La veglia contestuale richiede segnale osservato fuori dai periodi di sonno o a letto.
-            guard !episode[i], epoch.observedHR != nil || epoch.observedMotion != nil || (epoch.hasSteps && epoch.steps > 0)
-            else { return nil }
-            return false
+            guard !episode[i], hasContextSignal(epoch) else { return nil }
+            return .contextualWake
         }
-        return [false, true].flatMap { asleep in
-            Stats.runs(states.map { $0 == asleep }).map { run in
+        return [State.awake, .asleep, .contextualWake].flatMap { state in
+            Stats.runs(states.map { $0 == state }).map { run in
                 let span = DateSpan(start: epochs[run.lowerBound].start,
                                     end: epochs[run.upperBound - 1].start.addingTimeInterval(RingConst.epoch))
-                return SleepObservation(span: span, asleep: asleep)
+                return SleepObservation(span: span, asleep: state == .asleep, contextualWake: state == .contextualWake ? true : nil)
             }
         }.sorted { $0.span.start < $1.span.start }
     }

@@ -151,7 +151,7 @@ public struct WorkoutRecord: Codable, Sendable, Equatable {
     public var trimp: Double { HeartRate.trimp(zoneMinutes) }
 }
 
-public struct DateSpan: Codable, Sendable, Equatable {
+public struct DateSpan: Codable, Sendable, Hashable {
     public var start: Date
     public var end: Date
     public init(start: Date, end: Date) { self.start = start; self.end = end }
@@ -161,7 +161,29 @@ public struct DateSpan: Codable, Sendable, Equatable {
 public struct SleepObservation: Codable, Sendable, Equatable {
     public let span: DateSpan
     public let asleep: Bool
-    public init(span: DateSpan, asleep: Bool) { self.span = span; self.asleep = asleep }
+    /// Vero soltanto per la veglia inferita dal segnale fuori dagli episodi noti. nil negli archivi precedenti.
+    public let contextualWake: Bool?
+    public init(span: DateSpan, asleep: Bool, contextualWake: Bool? = nil) {
+        self.span = span; self.asleep = asleep; self.contextualWake = contextualWake
+    }
+}
+
+struct EveningSleepRevision: Codable, Sendable, Hashable {
+    let eveningDay: StressDayAxis
+    let confirmedAt: Date
+    /// Un array vuoto è una sostituzione confermata che non contribuisce sonno alla sera precedente.
+    let runs: [DateSpan]
+}
+
+struct RegularityAlignmentInputs: Codable, Sendable {
+    let referenceMidH: Double?
+    let daylightMin: Double?
+
+    func score(midpoint: Double?, sri: Double?, socialJetlag: Double?) -> Double? {
+        guard (midpoint != nil && referenceMidH != nil) || sri != nil || daylightMin != nil || socialJetlag != nil else { return nil }
+        return Circadian.alignment(lastMidH: midpoint, referenceMidH: referenceMidH, sri: sri,
+                                   daylightMin: daylightMin, sjlH: socialJetlag)
+    }
 }
 
 public enum BedTimingOrigin: String, Codable, Sendable, Equatable {
@@ -226,7 +248,7 @@ public struct NightReport: Codable, Sendable {
     public var restorativeShare: Double { tstMin > 0 ? restorativeMin / tstMin : 0 }
 }
 
-public struct StressDayAxis: Codable, Sendable {
+public struct StressDayAxis: Codable, Sendable, Hashable {
     public let start: Date
     public let end: Date
     public let timeZoneIdentifier: String
@@ -339,7 +361,14 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     public internal(set) var computedAt: Date? = nil
     /// Tratti classificati; i buchi sono ignoti. nil nei report antecedenti al contratto di osservabilità.
     public internal(set) var sleepObservations: [SleepObservation]? = nil
+    /// Presente soltanto se il report materializza una correzione. I tratti originali restano immutati.
+    var sleepObservationsBeforeReconciliation: [SleepObservation]? = nil
+    var originalSleepObservations: [SleepObservation]? { sleepObservationsBeforeReconciliation ?? sleepObservations }
     public internal(set) var stressAxis: StressDayAxis? = nil
+    var eveningSleepRevisions: [EveningSleepRevision]? = nil
+    var regularityAlignmentInputs: RegularityAlignmentInputs? = nil
+    /// Istante del riesame retroattivo del solo SRI e del relativo allineamento.
+    public internal(set) var sriReconciledAt: Date? = nil
     public var calibrating: Bool { state(\.recovery) == .stale || evidence?.baselineReady != true }
 
     public func state(_ metric: KeyPath<DailyEvidence, DailyMetricState>) -> DailyMetricState {

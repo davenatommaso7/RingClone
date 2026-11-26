@@ -182,6 +182,7 @@ public enum History {
         source.sriReconciledAt = nil
         source.sriNeedsProvenance = nil
         source.eveningSleepRevisions = nil
+        source.archivedNightVariants = nil
         source.sleepObservations = report.originalSleepObservations
         source.sleepObservationsBeforeReconciliation = nil
         return try encode([source])
@@ -297,7 +298,10 @@ public enum History {
         let from = calendar.date(byAdding: .day, value: -7, to: day.start) ?? day.start.addingTimeInterval(-7 * 86_400)
         let relevant = history.filter { $0.date >= from && $0.date <= day.end }
         let revisions = relevant.flatMap(attachedEveningRevisions) + incomingRevisions
-        let prior = onePerDay(relevant.filter { $0.date < day.start && ($0.computedAt ?? .distantPast) <= visibleAt }, calendar: calendar)
+        let prior = onePerDay(relevant.filter { report in
+            let observationAt = report.sectorFreshness?.nightPreserved == true ? report.sectorFreshness?.nightAt : report.computedAt
+            return report.date < day.start && (observationAt ?? .distantPast) <= visibleAt
+        }, calendar: calendar)
         var days: [Date: [SleepObservation]] = [:]
         var conflicts: [Date: [DateSpan]] = [:]
         for r in prior {
@@ -398,10 +402,184 @@ public enum History {
     /// Inserisce o sostituisce il report del giorno, mantiene l'ordine cronologico e al massimo `keepDays` giorni.
     public static func upsert(_ report: DailyReport, into history: [DailyReport], calendar: Calendar, keepDays: Int = 400) -> [DailyReport] {
         var h = onePerDay(history + [report], calendar: calendar)
+        if let index = h.firstIndex(where: { $0.date == report.date }),
+           let prior = onePerDay(history.filter { $0.date == report.date }, calendar: calendar).first {
+            h[index] = mergeRefresh(latest: h[index], prior: prior, incoming: report)
+        }
         if let last = h.last?.date, let limit = calendar.date(byAdding: .day, value: -keepDays, to: last) {
             h.removeAll { $0.date < limit }
         }
         return reconcileArchive(h, replacing: report.date, previous: history, calendar: calendar)
+    }
+
+    private struct NightShape: Hashable {
+        let inBed: Date
+        let outOfBed: Date
+        let sleep: [DateSpan]
+        let proof: NightReadProof?
+
+        init(_ sector: ArchivedNight) {
+            inBed = sector.night.inBed; outOfBed = sector.night.outOfBed
+            sleep = sector.night.sleepRuns; proof = sector.proof
+        }
+    }
+
+    private static func nightVariants(_ prior: DailyReport, _ incoming: DailyReport) -> [ArchivedNight] {
+        let candidates = (prior.archivedNightVariants ?? [ArchivedNight(prior)].compactMap { $0 }) +
+            (incoming.archivedNightVariants ?? [ArchivedNight(incoming)].compactMap { $0 })
+        let ordered = candidates.compactMap { value in (try? encoder().encode(value)).map { (value, $0) } }
+            .sorted { a, b in
+                let first = a.0.at ?? .distantPast, second = b.0.at ?? .distantPast
+                return first == second ? a.1.lexicographicallyPrecedes(b.1) : first < second
+            }.map(\.0)
+        let retained = Dictionary(grouping: ordered.indices.filter { ordered[$0].proof?.closed == true },
+                                  by: { NightShape(ordered[$0]) })
+        var keep = Set(retained.values.flatMap { [$0.first, $0.last].compactMap { $0 } })
+        if let initial = ordered.indices.first, ordered[initial].proof?.closed != true { keep.insert(initial) }
+        // Le riletture identiche allo stesso istante sono un unico candidato.
+        var seen = Set<Data>()
+        return keep.sorted().compactMap { i in
+            let value = ordered[i]
+            guard let key = try? encoder().encode(value), seen.insert(key).inserted else { return nil }
+            return value
+        }
+    }
+
+    private static func covered(_ span: DateSpan, by coverage: [DateSpan]) -> Bool {
+        var cursor = span.start
+        for run in coverage where run.end > cursor {
+            if run.start > cursor { return false }
+            cursor = run.end
+            if cursor >= span.end { return true }
+        }
+        return cursor >= span.end
+    }
+
+    private static func canReplace(_ old: ArchivedNight, with candidate: ArchivedNight) -> Bool {
+        guard let proof = candidate.proof, proof.closed else { return false }
+        if let previousSource = old.proof?.source, previousSource != proof.source { return false }
+        let previous = old.night.sleepRuns.isEmpty ? [DateSpan(start: old.night.sleepOnset, end: old.night.finalWake)]
+            : old.night.sleepRuns
+        let sameSource = proof.source != nil && proof.source == old.proof?.source
+        let coverage = (candidate.night.sleepRuns + (sameSource ? proof.explicitWake : [])).sorted { $0.start < $1.start }
+        return previous.allSatisfy { covered($0, by: coverage) }
+    }
+
+    private static func acceptedNight(_ ordered: [ArchivedNight]) -> ArchivedNight? {
+        let byTime = Dictionary(grouping: ordered, by: { $0.at ?? .distantPast })
+        var result: ArchivedNight?
+        for time in byTime.keys.sorted() {
+            guard let readings = byTime[time], Set(readings.map(NightShape.init)).count == 1,
+                  let candidate = readings.last else { continue }
+            if let previous = result, !canReplace(previous, with: candidate) { continue }
+            result = candidate
+        }
+        return result
+    }
+
+    private static func sectorTime(_ report: DailyReport, at key: KeyPath<ReportSectorFreshness, Date?>,
+                                   state: KeyPath<DailyEvidence, DailyMetricState>) -> Date? {
+        if let acquired = report.sectorFreshness?[keyPath: key] { return acquired }
+        return report.state(state) == .observed ? report.computedAt : nil
+    }
+
+    private static func preserveObservedEnergy(in report: inout DailyReport, from prior: DailyReport,
+                                                and incoming: DailyReport, freshness: inout ReportSectorFreshness) {
+        for (time, state, value) in [
+            (\ReportSectorFreshness.activeEnergyAt, \DailyEvidence.energyActive, \DailyReport.kcalActive),
+            (\ReportSectorFreshness.totalEnergyAt, \DailyEvidence.energyTotal, \DailyReport.kcalTotal),
+        ] {
+            let older = sectorTime(prior, at: time, state: state)
+            let newer = sectorTime(incoming, at: time, state: state)
+            guard older != nil || newer != nil else { continue }
+            let usePrior = (older ?? .distantPast) >= (newer ?? .distantPast)
+            report[keyPath: value] = usePrior ? prior[keyPath: value] : incoming[keyPath: value]
+            freshness[keyPath: time] = usePrior ? older : newer
+            let conflict = older == newer && prior[keyPath: value] != incoming[keyPath: value]
+            report.evidence?[keyPath: state] = conflict ? .stale : .observed
+        }
+        if let active = freshness.activeEnergyAt, let total = freshness.totalEnergyAt, active > total {
+            report.evidence?.energyTotal = .stale
+        }
+    }
+
+    private static func mergeRefresh(latest: DailyReport, prior: DailyReport, incoming: DailyReport) -> DailyReport {
+        guard let axis = incoming.stressAxis, axis == prior.stressAxis, axis.start == incoming.date else {
+            // Un vecchio report senza asse può essere letto, ma le sue misure non si uniscono a un nuovo asse.
+            if prior.stressAxis == nil, prior.night != nil, incoming.nightReadProof?.closed != true {
+                var unchanged = prior
+                unchanged.sectorFreshness = unchanged.sectorFreshness ?? ReportSectorFreshness(nightAt: prior.computedAt)
+                unchanged.sectorFreshness?.nightPreserved = true
+                return unchanged
+            }
+            return latest
+        }
+        guard incoming.sectorFreshness != nil || prior.sectorFreshness != nil else { return latest }
+        var report = latest
+        var freshness = latest.sectorFreshness ?? ReportSectorFreshness()
+        preserveObservedEnergy(in: &report, from: prior, and: incoming, freshness: &freshness)
+        let variants = nightVariants(prior, incoming)
+        report.archivedNightVariants = variants.count > 1 ? variants : nil
+        if let night = acceptedNight(variants) {
+            freshness.nightAt = night.at
+            let matchesLatest = ArchivedNight(latest).map { NightShape($0) == NightShape(night) } ?? false
+            freshness.nightPreserved = night.at == nil || night.at != latest.computedAt || !matchesLatest
+            if freshness.nightPreserved {
+                report.night = night.night; report.nightReadProof = night.proof
+                report.naps = night.naps; report.napsMin = night.napsMin; report.dailySleepMin = night.total
+                report.sleepDebtH = night.debt; report.sleepConsistency = night.consistency
+                report.rhr = night.rhr; report.evidence?.rhr = night.rhrState
+                report.sleepObservations = night.observations; report.sleepObservationsBeforeReconciliation = nil
+                report.regularityAlignmentInputs = night.alignmentInputs
+                report.evidence?.activity = .stale; report.evidence?.movement = .stale
+                report.evidence?.stress = .stale; report.evidence?.rhythm = .stale
+                report.evidence?.recovery = .stale; report.flags = []
+                report.evidence?.alignment = .stale; report.evidence?.tempMinimum = .stale
+                report.evidence?.fitness = .stale
+                mergeDaytimePulse(in: &report, from: prior, and: incoming, freshness: &freshness, axis: axis, night: night)
+            }
+        } else if !variants.isEmpty {
+            report.night = nil; report.nightReadProof = nil; report.dailySleepMin = nil
+            freshness.nightAt = nil; freshness.nightPreserved = true
+        }
+        report.sectorFreshness = freshness
+        return report
+    }
+
+    private static func mergeDaytimePulse(in report: inout DailyReport, from prior: DailyReport, and incoming: DailyReport,
+                                          freshness: inout ReportSectorFreshness, axis: StressDayAxis, night: ArchivedNight) {
+        guard let nightCarrier = [prior, incoming].first(where: { reading in
+            ArchivedNight(reading).map { $0.at == night.at && NightShape($0) == NightShape(night) } ?? false
+        }) else {
+            report.evidence?.zones = .stale
+            freshness.daytimePulseAt = nil
+            return
+        }
+        let bounds = nightCarrier.zoneBounds
+        report.zoneBounds = bounds; report.hrMax = nightCarrier.hrMax; report.hrMaxMeasured = nightCarrier.hrMaxMeasured
+        let protected = [DateSpan(start: night.night.inBed, end: night.night.outOfBed)] + night.naps
+        func belongsToNight(_ offset: Int) -> Bool {
+            let start = axis.start.addingTimeInterval(Double(offset) * 60)
+            let end = start.addingTimeInterval(60)
+            return protected.contains { $0.start < end && start < $0.end }
+        }
+        let count = Int(axis.end.timeIntervalSince(axis.start) / 60)
+        let readings = [prior, incoming].filter { $0.zoneBounds == bounds && $0.pulseZoneCells?.count == count }
+            .sorted { ($0.sectorFreshness?.daytimePulseAt ?? .distantPast) < ($1.sectorFreshness?.daytimePulseAt ?? .distantPast) }
+        guard let recent = readings.last(where: { reading in
+            reading.pulseZoneCells?.enumerated().contains { $0.element > 0 && !belongsToNight($0.offset) } == true
+        }), let daytime = recent.pulseZoneCells else {
+            freshness.daytimePulseAt = nightCarrier.sectorFreshness?.daytimePulseAt
+            report.pulseZoneCells = nightCarrier.pulseZoneCells
+            report.zoneMinutesDay = nightCarrier.zoneMinutesDay; report.evidence?.zones = .stale
+            return
+        }
+        let overnight = nightCarrier.pulseZoneCells?.count == count ? nightCarrier.pulseZoneCells : nil
+        let cells = Data(daytime.enumerated().map { offset, value in belongsToNight(offset) ? overnight?[offset] ?? 0 : value })
+        var totals = [Double](repeating: 0, count: 5)
+        for value in cells where value >= 2 && value <= 6 { totals[Int(value) - 2] += 1 }
+        report.zoneMinutesDay = totals; report.pulseZoneCells = cells; report.evidence?.zones = .computed
+        freshness.daytimePulseAt = recent.sectorFreshness?.daytimePulseAt ?? recent.computedAt
     }
 
     private static func reconcileArchive(_ history: [DailyReport], replacing date: Date, previous: [DailyReport],
@@ -430,7 +608,9 @@ public enum History {
                                                target: axis, revisions: newRevisions, history: history, visibleAt: visibleAt)
             let projectionChanged = before != after && (before != observedBefore || after != original)
             let supersededTime = oldRevisions != newRevisions && oldRevisions.contains { $0.confirmedAt > visibleAt }
-            guard projectionChanged || conflictsBefore != conflictsAfter || supersededTime,
+            let nightChanged = day == date && previousTarget != nil &&
+                (updated.sectorFreshness?.nightPreserved == true || original != observedBefore)
+            guard projectionChanged || conflictsBefore != conflictsAfter || supersededTime || nightChanged,
                   let limit = calendar.date(byAdding: .day, value: 7, to: day) else { continue }
             affected.append(day...limit)
         }
@@ -455,7 +635,9 @@ public enum History {
             revised.sriReconciledAt = visibleAt
             revised.sriNeedsProvenance = needsProvenance
             if sri == candidate.sri { return revised }
-            if let inputs = candidate.regularityAlignmentInputs {
+            if candidate.sectorFreshness?.nightPreserved == true {
+                revised.evidence?.alignment = .stale
+            } else if let inputs = candidate.regularityAlignmentInputs {
                 let score = inputs.score(midpoint: candidate.night?.midpointH, sri: sri, socialJetlag: candidate.socialJetlagScH)
                 revised.circadianAlignment = score ?? .nan
                 revised.evidence?.alignment = score == nil ? .insufficient : .estimated

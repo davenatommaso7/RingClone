@@ -107,12 +107,14 @@ final class IndependentMidnightProvenanceTests: XCTestCase {
         let initial = DayInput.make(day: previous, calendar: calendar, now: day,
                                     hr: eveningPulse, steps: [], motion: [])
         let initialReport = DailyPipeline.run(initial, profile: profile, history: [])
-        func update(_ history: [DailyReport], now: Double, samples: [SleepSegment]) -> [DailyReport] {
+        func reading(_ history: [DailyReport], now: Double, samples: [SleepSegment]) -> DailyReport {
             let input = DayInput.make(day: day, calendar: calendar, now: at(now),
                                       hr: [TimedValue(date: at(720), value: 75)], steps: [], motion: [],
                                       appleSleep: samples)
-            return History.upsert(DailyPipeline.run(input, profile: profile, history: history),
-                                  into: history, calendar: calendar)
+            return DailyPipeline.run(input, profile: profile, history: history)
+        }
+        func update(_ history: [DailyReport], now: Double, samples: [SleepSegment]) -> [DailyReport] {
+            History.upsert(reading(history, now: now, samples: samples), into: history, calendar: calendar)
         }
         func states(_ history: [DailyReport]) throws -> [Bool?] {
             let prior = try XCTUnwrap(history.first { $0.date == previous })
@@ -129,8 +131,10 @@ final class IndependentMidnightProvenanceTests: XCTestCase {
             SleepSegment(start: at(-10), end: at(-5), stage: .wake),
             SleepSegment(start: at(-4), end: at(0), stage: nil)
         ]
-        let partial = update(confirmed, now: 840, samples: anonymous)
-        XCTAssertNil(partial.last?.night)
+        let incomplete = reading(confirmed, now: 840, samples: anonymous)
+        XCTAssertNil(incomplete.night)
+        let partial = History.upsert(incomplete, into: confirmed, calendar: calendar)
+        XCTAssertEqual(try XCTUnwrap(partial.last?.night).tstMin, 260)
         let restarted = try History.decode(History.encode(partial))
         XCTAssertEqual(try states(restarted), [true, true, true])
         let replayed = update(restarted, now: 840, samples: anonymous)

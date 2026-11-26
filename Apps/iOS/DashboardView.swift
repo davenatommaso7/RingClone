@@ -225,14 +225,17 @@ private struct ScoresCard: View {
         Card(title: "Punteggi", symbol: "circle.hexagongrid") {
             HStack(alignment: .top) {
                 if let n = report.night {
-                    Score(name: "Sleep Index", value: n.sleepIndex, tint: .indigo, state: report.evidence == nil ? .stale : .computed)
+                    Score(name: "Sleep Index", value: n.sleepIndex, tint: .indigo,
+                          state: report.evidence == nil || report.sectorFreshness?.nightPreserved == true ? .stale : .computed)
                 }
                 Score(name: "Recupero", value: report.recovery, tint: .green, state: report.state(\.recovery))
                 Score(name: "Movement Index", value: report.movementIndex, tint: .orange, state: report.state(\.movement))
                 Score(name: "Allineamento circadiano", value: report.circadianAlignment, tint: .teal, state: report.state(\.alignment))
             }
             if report.state(\.recovery).hasValue { Row(name: "Recupero", value: report.recoveryLabel) }
-            if let n = report.night, report.evidence != nil { Row(name: "Sonno", value: SleepMetrics.label(n.sleepIndex)) }
+            if let n = report.night, report.evidence != nil, report.sectorFreshness?.nightPreserved != true {
+                Row(name: "Sonno", value: SleepMetrics.label(n.sleepIndex))
+            }
             if report.state(\.recovery).hasValue {
                 Parts(title: "Contributi al recupero (scarti dalla tua norma)", parts: report.recoveryParts) {
                     Presentation.number($0, digits: 1, signed: true)
@@ -266,7 +269,7 @@ private struct SleepCard: View {
                 Text("Notte non registrata.").font(.subheadline).foregroundStyle(.secondary)
             }
             Lines(lines: Presentation.sleepLines(report))
-            if let n = report.night {
+            if let n = report.night, report.sectorFreshness?.nightPreserved != true {
                 Parts(title: "Contributi allo Sleep Index", parts: n.sleepIndexParts) { Presentation.number($0 * 100, unit: "%") }
             }
         }

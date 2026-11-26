@@ -341,6 +341,14 @@ public enum DailyPipeline {
             tempMinimum: !tMins.isEmpty ? .computed : (tMin != nil ? .estimated : .unavailable),
             fitness: fit?.state ?? .insufficient, baselineReady: baselineReady)
 
+        let pulseCells = evidence.zones.hasValue ? Data(observedHRMin.map { value in
+            value.map { UInt8(HeartRate.zone(of: $0, bounds: bounds) + 1) } ?? 0
+        }) : nil
+        let freshness = ReportSectorFreshness(nightAt: night == nil ? nil : input.now,
+                                              daytimePulseAt: observedHRMin.indices.contains { !inBed[$0] && observedHRMin[$0] != nil } ? input.now : nil,
+                                              activeEnergyAt: activeEnergy == .observed ? input.now : nil,
+                                              totalEnergyAt: totalEnergy == .observed ? input.now : nil)
+
         return DailyReport(
             date: day, night: night, naps: naps, napsMin: napsMin, dailySleepMin: dailySleep, sleepDebtH: debt, sri: sri,
             sleepConsistency: consistency,
@@ -359,7 +367,8 @@ public enum DailyPipeline {
             sleepObservationsBeforeReconciliation: effective == observations ? nil : observations, stressAxis: axis,
             eveningSleepRevisions: eveningRevisions.isEmpty ? nil : eveningRevisions,
             regularityAlignmentInputs: alignmentInputs, sriReconciledAt: effective == observations ? nil : input.now,
-            sriNeedsProvenance: regularity.needsProvenance ? true : nil)
+            sriNeedsProvenance: regularity.needsProvenance ? true : nil, sectorFreshness: freshness,
+            nightReadProof: night.map { nightReadProof(input, periods: periods, night: $0) }, pulseZoneCells: pulseCells)
     }
 
     private static func eveningRevision(_ input: DayInput, periods: SleepPeriods, night: NightReport?) -> EveningSleepRevision? {
@@ -378,10 +387,8 @@ public enum DailyPipeline {
         return day
     }
 
-    private static func confirmedEveningSleep(_ input: DayInput, periods: SleepPeriods,
-                                               night: NightReport?, eveningDay: StressDayAxis) -> EveningSleepRevision? {
-        guard let night, night.finalWake >= input.day, night.finalWake < input.dayEnd,
-              night.outOfBed <= input.now else { return nil }
+    private static func nightIsClosed(_ input: DayInput, periods: SleepPeriods, night: NightReport) -> Bool {
+        guard night.finalWake >= input.day, night.finalWake < input.dayEnd, night.outOfBed <= input.now else { return false }
         let end = min(input.dayEnd, input.now)
         let observedRise = night.bedTimingOrigin == .inBedObservation && night.outOfBed > night.finalWake
         let observedAfter = input.epochs.indices.contains { i in
@@ -390,8 +397,39 @@ public enum DailyPipeline {
             if periods.appleStages[i] == .wake { return true }
             return !periods.appleContext[i] && !periods.naps.contains { $0.contains(i) } && hasContextSignal(epoch)
         }
-        // Una notte vicina alla fine dei dati non equivale a una notte conclusa.
-        guard observedRise || observedAfter else { return nil }
+        return observedRise || observedAfter
+    }
+
+    private static func nightReadProof(_ input: DayInput, periods: SleepPeriods, night: NightReport) -> NightReadProof {
+        let source = input.appleSleepSource.flatMap { key in
+            periods.source == "apple" && input.appleSleep.filter { $0.reportedStage?.isSleep == true }
+                .allSatisfy { $0.source == nil || $0.source == key } ? key : nil
+        }
+        let main = input.epochs.indices.filter { night.sleepOnset <= input.epochs[$0].start && input.epochs[$0].start < night.finalWake }
+        let compatible = !main.isEmpty && (periods.source == "apple" ? main.allSatisfy {
+            guard let stage = periods.appleStages[$0] else { return false }
+            return stage != .unknown
+        } : main.allSatisfy { input.epochs[$0].observedMotion != nil })
+        guard nightIsClosed(input, periods: periods, night: night), compatible else {
+            return NightReadProof(closed: false, source: source, explicitWake: [])
+        }
+        let explicitWake = source.map { key in
+            let observed = input.appleSleep.filter { $0.source == key && $0.reportedStage == .wake }
+            return Stats.runs(input.epochs.indices.map { i in
+                guard periods.appleStages[i] == .wake else { return false }
+                let start = input.epochs[i].start, end = start.addingTimeInterval(RingConst.epoch)
+                return observed.contains { $0.start <= start && $0.end >= end }
+            }).map { run in
+                DateSpan(start: input.epochs[run.lowerBound].start,
+                         end: input.epochs[run.upperBound - 1].start.addingTimeInterval(RingConst.epoch))
+            }
+        } ?? []
+        return NightReadProof(closed: true, source: source, explicitWake: explicitWake)
+    }
+
+    private static func confirmedEveningSleep(_ input: DayInput, periods: SleepPeriods,
+                                               night: NightReport?, eveningDay: StressDayAxis) -> EveningSleepRevision? {
+        guard let night, nightIsClosed(input, periods: periods, night: night) else { return nil }
         let runs = night.sleepRuns.compactMap { span -> DateSpan? in
             let start = max(span.start, eveningDay.start), end = min(span.end, eveningDay.end)
             return start < end ? DateSpan(start: start, end: end) : nil

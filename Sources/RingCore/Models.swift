@@ -336,6 +336,47 @@ public struct DailyEvidence: Codable, Sendable {
     public var baselineReady: Bool
 }
 
+public struct ReportSectorFreshness: Codable, Sendable {
+    public internal(set) var nightAt: Date?
+    public internal(set) var daytimePulseAt: Date?
+    public internal(set) var activeEnergyAt: Date?
+    public internal(set) var totalEnergyAt: Date?
+    public internal(set) var nightPreserved = false
+}
+
+struct NightReadProof: Codable, Sendable, Hashable {
+    let closed: Bool
+    let source: SleepSourceKey?
+    let explicitWake: [DateSpan]
+}
+
+struct ArchivedNight: Codable, Sendable {
+    let at: Date?
+    let night: NightReport
+    let proof: NightReadProof?
+    let naps: [DateSpan]
+    let napsMin: Double
+    let total: Double?
+    let debt: Double
+    let consistency: Double?
+    let rhr: Double
+    let rhrState: DailyMetricState
+    let observations: [SleepObservation]?
+    let alignmentInputs: RegularityAlignmentInputs?
+
+    init?(_ report: DailyReport) {
+        guard let night = report.night else { return nil }
+        at = report.sectorFreshness?.nightPreserved == true ? report.sectorFreshness?.nightAt
+            : (report.sectorFreshness?.nightAt ?? report.computedAt)
+        self.night = night; proof = report.nightReadProof
+        naps = report.naps; napsMin = report.napsMin; total = report.dailySleepMin
+        debt = report.sleepDebtH; consistency = report.sleepConsistency
+        rhr = report.rhr; rhrState = report.state(\.rhr)
+        observations = report.originalSleepObservations
+        alignmentInputs = report.regularityAlignmentInputs
+    }
+}
+
 public struct DailyReport: Codable, Sendable, Identifiable {
     /// inizio del giorno di calendario locale
     public var date: Date
@@ -402,6 +443,11 @@ public struct DailyReport: Codable, Sendable, Identifiable {
     /// Istante del riesame retroattivo del solo SRI e del relativo allineamento.
     public internal(set) var sriReconciledAt: Date? = nil
     public internal(set) var sriNeedsProvenance: Bool? = nil
+    public internal(set) var sectorFreshness: ReportSectorFreshness? = nil
+    var nightReadProof: NightReadProof? = nil
+    var archivedNightVariants: [ArchivedNight]? = nil
+    /// 0 = assente, 1 = FC osservata sotto Z1, 2...6 = zona 1...5. Indicizzata su minuti civili trascorsi.
+    var pulseZoneCells: Data? = nil
     public var calibrating: Bool { state(\.recovery) == .stale || evidence?.baselineReady != true }
 
     public func state(_ metric: KeyPath<DailyEvidence, DailyMetricState>) -> DailyMetricState {

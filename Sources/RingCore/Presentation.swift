@@ -170,6 +170,10 @@ public enum Presentation {
 
     public static func sleepLines(_ r: DailyReport) -> [Line] {
         var out: [Line] = []
+        if r.sectorFreshness?.nightPreserved == true {
+            let timing = r.sectorFreshness?.nightAt.map { " Dati della lettura del " + reportTime($0, in: r) + "." } ?? ""
+            out.append(Line("Aggiornamento del sonno", "Rilettura incompleta. La notte rimane quella già registrata." + timing))
+        }
         if let n = r.night {
             let timing = n.bedTimingOrigin == .inBedObservation ? "" : " (stima)"
             out += [
@@ -202,6 +206,12 @@ public enum Presentation {
 
     public static func heartLines(_ r: DailyReport) -> [Line] {
         var out = [Line("FC a riposo", display(r.state(\.rhr), value: number(r.rhr, unit: "bpm")))]
+        if r.sectorFreshness?.nightPreserved == true, let date = r.sectorFreshness?.nightAt {
+            out.append(Line("Dati notturni", "Lettura del " + reportTime(date, in: r)))
+        }
+        if r.sectorFreshness?.nightPreserved == true, let date = r.sectorFreshness?.daytimePulseAt {
+            out.append(Line("FC diurna", "Lettura del " + reportTime(date, in: r)))
+        }
         if let n = r.night {
             out += [
                 Line("FC media nel sonno", number(n.avgHR, unit: "bpm")),
@@ -223,14 +233,19 @@ public enum Presentation {
     }
 
     public static func activityLines(_ r: DailyReport) -> [Line] {
-        [
+        func energy(_ key: KeyPath<DailyEvidence, DailyMetricState>, amount: Double, at: Date?) -> String {
+            let value = display(r.state(key), value: number(amount, unit: "kcal"))
+            guard let at, let computedAt = r.computedAt, at < computedAt else { return value }
+            return value + " · Lettura del " + reportTime(at, in: r)
+        }
+        return [
             Line("Passi", display(r.state(\.steps), value: number(r.steps))),
             Line("Ore attive", display(r.state(\.activity), value: "\(r.activeHours)")),
             Line("Minuti attivi", display(r.state(\.activity), value: duration(r.activeMinutes))),
             Line("Tempo inattivo", display(r.state(\.activity), value: duration(r.inactiveMin))),
             Line("Periodo sedentario più lungo", display(r.state(\.activity), value: duration(r.longestSedentaryMin))),
-            Line("Calorie totali", display(r.state(\.energyTotal), value: number(r.kcalTotal, unit: "kcal"))),
-            Line("Calorie attive", display(r.state(\.energyActive), value: number(r.kcalActive, unit: "kcal"))),
+            Line("Calorie totali", energy(\.energyTotal, amount: r.kcalTotal, at: r.sectorFreshness?.totalEnergyAt)),
+            Line("Calorie attive", energy(\.energyActive, amount: r.kcalActive, at: r.sectorFreshness?.activeEnergyAt)),
             Line("Carico di allenamento (TRIMP)", display(r.state(\.trimp), value: number(r.trimp))),
         ]
     }
@@ -266,6 +281,15 @@ public enum Presentation {
     public static func regularityProvenanceNotice(_ r: DailyReport) -> String? {
         guard r.sriNeedsProvenance == true else { return nil }
         return "Regolarità da verificare. Per correggere la sera nello storico serve una rilettura dei dati di sonno e veglia."
+    }
+
+    private static func reportTime(_ date: Date, in report: DailyReport) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "it_IT")
+        let zone = report.stressAxis.flatMap { TimeZone(identifier: $0.timeZoneIdentifier) }
+        formatter.timeZone = zone ?? TimeZone(secondsFromGMT: 0)
+        formatter.dateStyle = .short; formatter.timeStyle = .short
+        return formatter.string(from: date) + (zone == nil ? " UTC" : "")
     }
 
     public static func fitnessLines(_ r: DailyReport) -> [Line] {

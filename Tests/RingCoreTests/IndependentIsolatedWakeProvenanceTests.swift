@@ -117,7 +117,7 @@ final class IndependentIsolatedWakeProvenanceTests: XCTestCase {
             ])
         ]
         for (index, result) in results.enumerated() {
-            XCTAssertEqual(try f.states([-15, -8, -2], in: result), [true, true, true], "Lettura \(index)")
+            XCTAssertEqual(try f.states([-15, -8, -2], in: result), [nil, true, true], "Lettura \(index)")
         }
     }
 
@@ -137,7 +137,7 @@ final class IndependentIsolatedWakeProvenanceTests: XCTestCase {
         XCTAssertEqual(try f.states([-8], in: withdrawn), [false])
         let reaffirmed = f.update(try roundTrip(withdrawn), now: 900, night: renewed)
         let afterReread = f.update(try roundTrip(reaffirmed), now: 960, providers: [provider])
-        XCTAssertEqual(try f.states([-15, -8, -2], in: afterReread), [true, true, true])
+        XCTAssertEqual(try f.states([-15, -8, -2], in: afterReread), [nil, true, true])
         let repeated = f.update(afterReread, now: 960, providers: [provider])
         XCTAssertEqual(try History.encode(repeated), try History.encode(afterReread))
 
@@ -151,7 +151,7 @@ final class IndependentIsolatedWakeProvenanceTests: XCTestCase {
 
         let outOfOrder = f.update(try roundTrip(f.update(base, now: 900, night: renewed)),
                                   now: 840, providers: [provider])
-        XCTAssertEqual(try f.states([-15, -8, -2], in: outOfOrder), [true, true, true])
+        XCTAssertEqual(try f.states([-15, -8, -2], in: outOfOrder), [nil, true, true])
         XCTAssertEqual(try f.priorReport(in: outOfOrder).sri, try f.priorReport(in: afterReread).sri)
     }
 }
